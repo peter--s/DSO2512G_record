@@ -75,6 +75,8 @@ and the **FRAME** logic channel pulses at each frame boundary.
 | `apply_record_feature.py` | Applies the patch to `app_clean.html` or the extracted pair. |
 | **`favicon.ico`** | DSO icon created with piskelapp.com and xsukax-Favicon-Generator. Helps finding the right tab when you opened too many.|
 
+---
+
 ### Generating the baseline using js_tools
 
 The scripts need `beautifulsoup4` + `jsbeautifier` (`html_cleaner.py`) and
