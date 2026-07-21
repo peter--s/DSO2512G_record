@@ -13,7 +13,7 @@ self‑contained `app_clean.html` or to its extracted `app_clean_extracted.js` /
 ## The RECORD feature
 
 ### Using it
-1. Open the app (`app_record.html`, or a patched `app_clean.html`) in Chrome/Edge (Web Serial).
+1. Open the app (a patched `app_record.html`, or a patched `app_clean_extracted.html`) in Chrome/Edge (Web Serial).
 2. **CONNECT** → pick the serial port and confirm.
 3. **START** — acquisition begins; the **RECORD** button becomes enabled.
 4. Click **RECORD** (it changes to **SAVE** and lights up) to begin capturing frames.
@@ -68,7 +68,7 @@ and the **FRAME** logic channel pulses at each frame boundary.
 | `html_cleaner.py` and `js_analyzer.py` | Cleans/pretty‑prints `app.html` → `app_clean.html` and analyses `app_clean.html`; with `-e` splits it into the extracted pair, both available at https://github.com/peter--s/js_tools/ ). |
 | `app_clean.html` | **Pristine** cleaned app (no recording feature). |
 | `app_clean_extracted.js` / `app_clean_extracted.html` | Extracted JS + HTML shell (no recording feature). |
-| `README.txt` | Structural report produced by `js_analyzer.py`. |
+| `README.txt` | Structural report (listing JS globals and functions contained in the HTML) produced by `js_analyzer.py`. |
 | **`app_record.html`** | The app **with** the recording feature already applied. |
 | **`jszip.min.js`** | Stuart Knightley's JSZip 3.10.1 — used to build the `.sr` ZIP in‑browser (available at https://github.com/Stuk/jszip/tree/main/dist). |
 | `record_feature.patch.json` | The patch definition (byte‑exact insertions). |
@@ -130,3 +130,5 @@ Notes:
   feature.
 - **JSZip:** inlined for `single` (keeps the app self‑contained/offline); referenced as a
   sibling file for `extracted`.
+- Keep oscilloscope_custom.ttf (and if desired favicon.ico) alongside the HTML (together with
+  app_clean_extracted.js when using the extracted pair).
