@@ -1,0 +1,64 @@
+{
+  "description": "RECORD/SAVE feature: capture acquired samples and export a sigrok .sr file for PulseView.",
+  "js_ops": [
+    {
+      "name": "globals",
+      "anchor": "let elapsedTimeText = '0 ms'; // Text to display elapsed time between buffer changes",
+      "payload": "\n\n// Variables for recording acquired samples into a sigrok .sr file (for PulseView import)\nlet appParam_isRecording = false; // true while a recording is active (RECORD pressed, showing SAVE)\nlet appParam_bufferUpdated = false; // raised by trackBufferChangeTime() on each genuinely new frame, consumed by the recorder\nlet recPendingCH1 = null; // pre-interpolation calibrated-volts snapshot of the current new frame (CH1)\nlet recPendingCH2 = null; // pre-interpolation calibrated-volts snapshot of the current new frame (CH2, or null)\nlet recordedFrames = []; // array of captured frames: { ch1: number[], ch2: number[]|null }\nlet recordSampleRate = 1; // samplerate captured at RECORD start (Sa/s); .sr carries a single samplerate\nlet recordCH2Enabled = false; // whether CH2 was enabled at RECORD start (fixes the recorded channel set)"
+    },
+    {
+      "name": "frame_flag",
+      "anchor": "previousPlotBuffer1 = currentBuffer; // Update the previous buffer",
+      "payload": "\n\n        appParam_bufferUpdated = true; // Signal a genuinely new acquisition frame (consumed by the recorder after processWaveforms)"
+    },
+    {
+      "name": "snapshot_ch1",
+      "anchor": "CH1rawPoints = convertToWaveArray(currentCH1Data);",
+      "payload": "\n\n        // Recording: snapshot the raw acquired (pre-interpolation) calibrated volts before further processing overwrites CH1rawPoints.\n        recPendingCH2 = null;\n        if (appParam_isRecording && appParam_bufferUpdated) recPendingCH1 = CH1rawPoints.slice();"
+    },
+    {
+      "name": "snapshot_ch2",
+      "anchor": "CH2rawPoints = convertToWaveArrayCH2(currentCH2Data);",
+      "payload": "\n\n            // Recording: snapshot the raw acquired (pre-interpolation) CH2 volts before further processing.\n            if (appParam_isRecording && appParam_bufferUpdated) recPendingCH2 = CH2rawPoints.slice();"
+    },
+    {
+      "name": "commit_frame",
+      "anchor": "processWaveforms(); // do required operations with the waveform data",
+      "payload": "\n    // Recording: commit one frame per genuinely new acquisition (deduped via appParam_bufferUpdated).\n    if (appParam_isRecording && appParam_bufferUpdated) {\n        recordedFrames.push({ ch1: recPendingCH1, ch2: recPendingCH2 });\n        appParam_bufferUpdated = false;\n    }"
+    },
+    {
+      "name": "enable_button",
+      "anchor": "document.getElementById('button-power').textContent = \"STOP\";",
+      "payload": "\n    document.getElementById('button-record').disabled = false; // Recording can start any time after START"
+    },
+    {
+      "name": "disable_button",
+      "anchor": "document.getElementById('button-power').textContent = \"START\";",
+      "payload": "\n    if (!appParam_isRecording) document.getElementById('button-record').disabled = true; // keep enabled if a recording is still open (so it can be SAVEd)"
+    },
+    {
+      "name": "functions",
+      "anchor": "iterateInterval = setInterval(doIteration, 100);\n    }\n}",
+      "payload": "\n\n//--------------------- RECORDING (PulseView .sr export) --------------------------------------------------------------------------------------------------------------------//\n\n// Toggles recording of acquired samples. RECORD (start) -> SAVE (finish, builds and downloads the .sr file).\nfunction toggleRecording() {\n    const btn = document.getElementById('button-record');\n    if (!appParam_isRecording) {\n        // Start recording. Only possible after START (button is disabled otherwise, but guard anyway).\n        if (!isPlotting) return;\n        recordedFrames = [];\n        appParam_bufferUpdated = false; // start capturing from the next genuinely new frame\n        recPendingCH1 = null;\n        recPendingCH2 = null;\n        recordSampleRate = appParam_sampleRate; // .sr carries a single samplerate; capture it now\n        recordCH2Enabled = (param_CH2enabled === 1); // fix the recorded channel set at start\n        appParam_isRecording = true;\n        btn.textContent = \"SAVE\";\n        btn.classList.add('button-lit');\n        log(\"Recording started...\");\n    } else {\n        // Finish recording and export the .sr file.\n        appParam_isRecording = false;\n        btn.textContent = \"RECORD\";\n        btn.classList.remove('button-lit');\n        if (recordedFrames.length > 0) {\n            exportRecordingSR();\n        } else {\n            log(\"Recording stopped: no frames were captured.\");\n        }\n        if (!isPlotting) btn.disabled = true; // plotting already stopped -> re-disable RECORD\n    }\n}\n\n// Converts an array of numbers into an ArrayBuffer of little-endian IEEE-754 float32 (sigrok analog format).\nfunction floatArrayToLEBytes(arr) {\n    const buf = new ArrayBuffer(arr.length * 4);\n    const dv = new DataView(buf);\n    for (let i = 0; i < arr.length; i++) {\n        dv.setFloat32(i * 4, arr[i], true); // true = little-endian\n    }\n    return buf;\n}\n\n// Formats a samplerate (Hz) as a sigrok-style string (e.g. \"200 MHz\"), mirroring sr_samplerate_string.\nfunction formatSamplerate(hz) {\n    hz = Math.round(hz);\n    if (hz <= 0) hz = 1;\n    if (hz % 1000000000 === 0) return (hz / 1000000000) + \" GHz\";\n    if (hz % 1000000 === 0) return (hz / 1000000) + \" MHz\";\n    if (hz % 1000 === 0) return (hz / 1000) + \" kHz\";\n    return hz + \" Hz\";\n}\n\n// Builds the sigrok v2 'metadata' INI file contents.\nfunction buildRecordingMetadata(sampleRate, ch2Enabled) {\n    let m = \"\";\n    m += \"[global]\\n\";\n    m += \"sigrok version=0.5.0\\n\";\n    m += \"\\n\";\n    m += \"[device 1]\\n\";\n    m += \"samplerate=\" + formatSamplerate(sampleRate) + \"\\n\";\n    m += \"capturefile=logic-1\\n\";\n    m += \"total probes=1\\n\";\n    m += \"probe1=FRAME\\n\";\n    m += \"unitsize=1\\n\";\n    m += \"total analog=\" + (ch2Enabled ? 2 : 1) + \"\\n\";\n    m += \"analog2=CH1\\n\";\n    if (ch2Enabled) m += \"analog3=CH2\\n\";\n    return m;\n}\n\n// Compact local timestamp YYYYMMDDThhmmss for the export filename.\nfunction recordingTimestamp() {\n    const d = new Date();\n    const p = (n) => String(n).padStart(2, '0');\n    return \"\" + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + \"T\" + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());\n}\n\n// Builds the .sr ZIP (via JSZip) from recordedFrames and triggers a download.\n// Each acquired frame becomes its own chunk (analog-1-<ch>-<n>, logic-1-<n>); a FRAME logic channel\n// pulses at each frame's first sample so boundaries are visible in PulseView.\nfunction exportRecordingSR() {\n    if (typeof JSZip === 'undefined') {\n        log(\"ERROR: JSZip library not loaded; cannot build the .sr file.\");\n        return;\n    }\n    const zip = new JSZip();\n    zip.file(\"version\", \"2\");\n    zip.file(\"metadata\", buildRecordingMetadata(recordSampleRate, recordCH2Enabled));\n\n    for (let i = 0; i < recordedFrames.length; i++) {\n        const n = i + 1;\n        const frame = recordedFrames[i];\n        const ch1 = frame.ch1 || [];\n        const len = ch1.length;\n\n        // Frame-marker logic channel: 1 byte per sample, 0x01 at the frame's first sample, 0x00 elsewhere.\n        const logicBytes = new Uint8Array(len);\n        if (len > 0) logicBytes[0] = 0x01;\n        zip.file(\"logic-1-\" + n, logicBytes);\n\n        // CH1 analog samples (little-endian float32).\n        zip.file(\"analog-1-2-\" + n, floatArrayToLEBytes(ch1));\n\n        // CH2 analog samples, aligned to CH1 length (pad with 0 / truncate) so all channels share one timeline.\n        if (recordCH2Enabled) {\n            const ch2src = frame.ch2 || [];\n            const ch2 = new Array(len);\n            for (let j = 0; j < len; j++) ch2[j] = (j < ch2src.length) ? ch2src[j] : 0;\n            zip.file(\"analog-1-3-\" + n, floatArrayToLEBytes(ch2));\n        }\n    }\n\n    const filename = \"DSO2512G_recording_\" + recordingTimestamp() + \".sr\";\n    zip.generateAsync({ type: \"blob\", compression: \"DEFLATE\" }).then((blob) => {\n        const url = URL.createObjectURL(blob);\n        const a = document.createElement('a');\n        a.href = url;\n        a.download = filename;\n        document.body.appendChild(a);\n        a.click();\n        document.body.removeChild(a);\n        URL.revokeObjectURL(url);\n        log(\"Saved \" + recordedFrames.length + \" frame(s) to \" + filename);\n    }).catch((err) => {\n        log(\"ERROR building .sr file: \" + err.message);\n    });\n}"
+    }
+  ],
+  "record_button_lines": [
+    "<button class=\"control-button button-big-power\" id=\"button-record\" onclick=\"toggleRecording()\" style=\"left: 300px; top: 0px;\" disabled=\"\">",
+    " RECORD",
+    "</button>"
+  ],
+  "button_anchor_id": "button-power",
+  "record_marker": "id=\"button-record\"",
+  "js_marker": "appParam_isRecording",
+  "jszip": {
+    "vendor_file": "jszip.min.js",
+    "script_id": "jszip-lib",
+    "comment": "<!-- Bundled JSZip 3.10.1 (inline, for offline .sr / PulseView export) -->",
+    "src_ref": "<script src=\"jszip.min.js\"></script>"
+  },
+  "favicon": {
+    "file": "favicon.ico",
+    "link": "<link rel=\"icon\" href=\"favicon.ico\"/>",
+    "marker": "rel=\"icon\""
+  }
+}
