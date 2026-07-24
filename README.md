@@ -5,15 +5,15 @@ oscilloscope is streaming, you can capture the acquired samples and download the
 **sigrok `.sr`** session file that imports directly into **PulseView**.
 
 The feature is delivered as a **patch** that can be applied either to the single
-self‑contained `app_clean.html` or to its extracted `app_clean_extracted.js` /
-`app_clean_extracted.html` pair.
+self‑contained `app.html` or to its extracted `app_extracted.js` /
+`app_extracted.html` parts.
 
 ---
 
 ## The RECORD feature
 
 ### Using it
-1. Open the app (a patched `app_record.html`, or a patched `app_clean_extracted.html`) in Chrome/Edge (Web Serial).
+1. Open the app (a patched `app_record.html`, or a patched `app_extracted.html`) in Chrome/Edge (Web Serial).
 2. **CONNECT** → pick the serial port and confirm.
 3. **START** — acquisition begins; the **RECORD** button becomes enabled.
 4. Click **RECORD** (it changes to **SAVE** and lights up) to begin capturing frames.
@@ -64,15 +64,14 @@ and the **FRAME** logic channel pulses at each frame boundary.
 
 | File | Role |
 |------|------|
-| `DSO2512G-APP-beta10.html` and **`oscilloscope_custom.ttf`** | **Hi-Ban's amazing app** (available at https://www.eevblog.com/forum/testgear/new-2ch-pocket-dsosg-sigpeak-dso2512g/msg5897308/#msg5897308 ). |
-| `html_cleaner.py` and `js_analyzer.py` | Cleans/pretty‑prints `app.html` → `app_clean.html` and analyses `app_clean.html`; with `-e` splits it into the extracted pair, both available at https://github.com/peter--s/js_tools/ ). |
-| `app_clean.html` | **Pristine** cleaned app (no recording feature). |
-| `app_clean_extracted.js` / `app_clean_extracted.html` | Extracted JS + HTML shell (no recording feature). |
+| `DSO2512G-APP-beta10.html` and **`oscilloscope_custom.ttf`** | **Hi-Ban's amazing app** (available at https://www.eevblog.com/forum/testgear/new-2ch-pocket-dsosg-sigpeak-dso2512g/msg5897308/#msg5897308 referred to below as `app.html`). |
+| `js_analyzer.py` | Cleans/pretty‑prints and analyses `app.html`; with `-e` splits it into individual JS and HTML files, available at https://github.com/peter--s/js_tools/ ). |
+| `app_extracted.js` and `app_extracted.html` | Extracted JS + HTML shell (no recording feature) produced by `js_analyzer.py`. |
 | `README.txt` | Structural report (listing JS globals and functions contained in the HTML) produced by `js_analyzer.py`. |
-| **`app_record.html`** | The app **with** the recording feature already applied. |
+| **`app_record.html`** | The app **with** the recording feature already applied. Produced by `apply_record_feature.py`.|
 | **`jszip.min.js`** | Stuart Knightley's JSZip 3.10.1 — used to build the `.sr` ZIP in‑browser (available at https://github.com/Stuk/jszip/tree/main/dist). |
 | `record_feature.patch.json` | The patch definition (byte‑exact insertions). |
-| `apply_record_feature.py` | Applies the patch to `app_clean.html` or the extracted pair. |
+| `apply_record_feature.py` | Applies the patch to `app.html` or the extracted pair. |
 | **`favicon.ico`** | DSO icon created with piskelapp.com and xsukax-Favicon-Generator. Helps finding the right tab when you opened too many.|
 
 ---
@@ -91,8 +90,8 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install beautifulsoup4 jsbeautifier esprima
 
 # regenerate:
-python3 html_cleaner.py DSO2512G-APP-beta10/DSO2512G-APP-beta10.html           # app.html            -> app_clean.html (pristine)
-python3 js_analyzer.py app_clean.html -n -g -u -e > README.txt  # app_clean.html -> app_clean_extracted.js/.html + report
+cp DSO2512G-APP-beta10/DSO2512G-APP-beta10.html app.html # -> app.html (pristine copy)
+python3 js_analyzer.py app.html -n -g -u -e > README.txt # app.html -> app_extracted.js/.html + report
 
 # (optional) leave the virtual environment when done
 deactivate
@@ -110,8 +109,8 @@ of two targets. **Each file is copied to `<file>.bak` before it is modified.** A
 python3 apply_record_feature.py single
 
 # Patch the extracted pair:
-#   - JS changes go into app_clean_extracted.js
-#   - RECORD button goes into app_clean_extracted.html
+#   - JS changes go into app_extracted.js
+#   - RECORD button goes into app_extracted.html
 #   - JSZip is referenced via <script src="jszip.min.js"> (keep jszip.min.js alongside)
 python3 apply_record_feature.py extracted
 
@@ -124,11 +123,11 @@ python3 apply_record_feature.py single --noicon
 
 Notes:
 - The JS insertions are matched by **unique code anchors**, which are identical in the inline
-  `<script>` of `app_clean.html` and in `app_clean_extracted.js`, so the same patch applies
+  `<script>` of `app.html` and in `app_extracted.js`, so the same patch applies
   to both. The RECORD button is inserted after `#button-power` with matching indentation.
 - **Idempotent:** the script aborts (changing nothing) if the target already contains the
   feature.
 - **JSZip:** inlined for `single` (keeps the app self‑contained/offline); referenced as a
   sibling file for `extracted`.
-- Keep oscilloscope_custom.ttf (and if desired favicon.ico) alongside the HTML (together with
-  app_clean_extracted.js when using the extracted pair).
+- Keep `oscilloscope_custom.ttf` (and if desired `favicon.ico`) alongside the HTML (together with
+  `app_extracted.js` when using the extracted pair).
