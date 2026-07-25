@@ -5,15 +5,15 @@ oscilloscope is streaming, you can capture the acquired samples and download the
 **sigrok `.sr`** session file that imports directly into **PulseView**.
 
 The feature is delivered as a **patch** that can be applied either to the single
-self‑contained `app.html` or to its extracted `app_extracted.js` /
-`app_extracted.html` parts.
+self‑contained `app_clean.html` or to its extracted `app_clean_extracted.js` /
+`app_clean_extracted.html` pair.
 
 ---
 
 ## The RECORD feature
 
 ### Using it
-1. Open the app (a patched `app_record.html`, or a patched `app_extracted.html`) in Chrome/Edge (Web Serial).
+1. Open the app (`app_record.html`, or the patched `app_record_extracted.html`) in Chrome/Edge (Web Serial).
 2. **CONNECT** → pick the serial port and confirm.
 3. **START** — acquisition begins; the **RECORD** button becomes enabled.
 4. Click **RECORD** (it changes to **SAVE** and lights up) to begin capturing frames.
@@ -60,58 +60,65 @@ and the **FRAME** logic channel pulses at each frame boundary.
 
 ---
 
-## Files
+## Needed Files
 
 | File | Role |
 |------|------|
-| `DSO2512G-APP-beta10.html` and **`oscilloscope_custom.ttf`** | **Hi-Ban's amazing app** (available at https://www.eevblog.com/forum/testgear/new-2ch-pocket-dsosg-sigpeak-dso2512g/msg5897308/#msg5897308 referred to below as `app.html`). |
-| `js_analyzer.py` | Cleans/pretty‑prints and analyses `app.html`; with `-e` splits it into individual JS and HTML files, available at https://github.com/peter--s/js_tools/ ). |
-| `app_extracted.js` and `app_extracted.html` | Extracted JS + HTML shell (no recording feature) produced by `js_analyzer.py`. |
-| `README.txt` | Structural report (listing JS globals and functions contained in the HTML) produced by `js_analyzer.py`. |
-| **`app_record.html`** | The app **with** the recording feature already applied. Produced by `apply_record_feature.py`.|
-| **`jszip.min.js`** | Stuart Knightley's JSZip 3.10.1 — used to build the `.sr` ZIP in‑browser (available at https://github.com/Stuk/jszip/tree/main/dist). |
-| `record_feature.patch.json` | The patch definition (byte‑exact insertions). |
-| `apply_record_feature.py` | Applies the patch to `app.html` or the extracted pair. |
-| **`favicon.ico`** | DSO icon created with piskelapp.com and xsukax-Favicon-Generator. Helps finding the right tab when you opened too many.|
-
----
+| `DSO2512G-APP-beta10.html` + `oscilloscope_custom.ttf` | Hi‑Ban's app ([EEVblog thread](https://www.eevblog.com/forum/testgear/new-2ch-pocket-dsosg-sigpeak-dso2512g/msg5897308/#msg5897308)); copy the HTML to `app.html`. The `.ttf` provides the custom on‑screen symbols. |
+| `js_analyzer.py` | Cleans/pretty‑prints (`--clean`), analyses, and (`-e`) splits `app.html` into separate JS/HTML — from [peter--s/js_tools](https://github.com/peter--s/js_tools/). |
+| `app_clean.html` | **Pristine** cleaned app (no recording feature); produced by `js_analyzer.py --clean`. |
+| `app_clean_extracted.js` / `app_clean_extracted.html` | Extracted JS + HTML shell (no recording feature); produced by `js_analyzer.py -e`. |
+| `README.txt` | Structural report (classes, functions, variables, scope leaks, mutations) produced by `js_analyzer.py`. |
+| **`app_record.html`** | The app **with** the recording feature applied (self‑contained). Produced by `apply_record_feature.py single`. |
+| **`app_record_extracted.js` / `app_record_extracted.html`** | The extracted app with the feature applied. Produced by `apply_record_feature.py extracted`. |
+| **`jszip.min.js`** | Stuart Knightley's JSZip 3.10.1 — builds the `.sr` ZIP in‑browser ([dist](https://github.com/Stuk/jszip/tree/main/dist)). |
+| **`record_feature.patch.json`** | The patch definition (byte‑exact insertions). |
+| **`apply_record_feature.py`** | Applies the patch, writing the `app_record*` outputs (inputs untouched). |
+| **`favicon.ico`** | DSO icon created with piskelapp.com and xsukax‑Favicon‑Generator. Helps finding the right tab when you opened too many. |
 
 ### Generating the baseline using js_tools
 
-The scripts need `beautifulsoup4` + `jsbeautifier` (`html_cleaner.py`) and
-`beautifulsoup4` + `esprima` (`js_analyzer.py`).
+`js_analyzer.py` needs `beautifulsoup4` + `esprima` (plus `jsbeautifier` for `--clean`).
 
 ```bash
-# (optional) create & activate a virtual environment so the deps stay isolated
+# (optional) isolate the dependencies
 python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
+source .venv/bin/activate            # Windows: .venv\Scripts\activate
+pip install beautifulsoup4 esprima jsbeautifier
 
-# (optional) install the dependencies into the active environment
-pip install beautifulsoup4 jsbeautifier esprima
+# pristine working copy
+cp DSO2512G-APP-beta10.html app.html
 
-# regenerate:
-cp DSO2512G-APP-beta10/DSO2512G-APP-beta10.html app.html # -> app.html (pristine copy)
-python3 js_analyzer.py app.html -n -g -u -e > README.txt # app.html -> app_extracted.js/.html + report
+# clean + extract + report in one step:
+python3 js_analyzer.py app.html --clean -e -n -g -u > README.txt
+#   --clean -> app_clean.html                            (pretty-printed, title-bar layout repaired)
+#   then -e -> app_clean_extracted.js / .html            (extracted from the cleaned file)
+#   report  -> README.txt
 
-# (optional) leave the virtual environment when done
-deactivate
+deactivate                           # (optional) leave the venv
 ```
+
+With `--clean`, cleaning runs **first** and every later step uses `app_clean.html` as its input, so the
+extracted files are named `app_clean_extracted.*`. The title repair — restoring the `&nbsp;` padding
+that `prettify()` strips — is applied to both the cleaned HTML and the extracted HTML.
 
 ---
 
 ## The patching script
 
-`apply_record_feature.py` reads `record_feature.patch.json` and applies the feature to one
-of two targets. **Each file is copied to `<file>.bak` before it is modified.** An icon is added to the html header unless `-n` or `--noicon` is passed.
+`apply_record_feature.py` reads `record_feature.patch.json` and builds the feature version as
+**new output files, never modifying the pristine inputs** (an existing output is copied to
+`<file>.bak` before it is overwritten). An icon is added to the html header unless `-n` or
+`--noicon` is passed.
 
 ```bash
-# Patch the single self-contained file (JS + button + JSZip inlined):
+# single:   app_clean.html  ->  app_record.html   (JS + button + JSZip inlined)
 python3 apply_record_feature.py single
 
-# Patch the extracted pair:
-#   - JS changes go into app_extracted.js
-#   - RECORD button goes into app_extracted.html
+# extracted: app_clean_extracted.js   -> app_record_extracted.js
+#            app_clean_extracted.html  -> app_record_extracted.html
 #   - JSZip is referenced via <script src="jszip.min.js"> (keep jszip.min.js alongside)
+#   - the output HTML is re-pointed to app_record_extracted.js
 python3 apply_record_feature.py extracted
 
 # Optional: operate on a different project directory
@@ -123,11 +130,13 @@ python3 apply_record_feature.py single --noicon
 
 Notes:
 - The JS insertions are matched by **unique code anchors**, which are identical in the inline
-  `<script>` of `app.html` and in `app_extracted.js`, so the same patch applies
+  `<script>` of `app_clean.html` and in `app_clean_extracted.js`, so the same patch applies
   to both. The RECORD button is inserted after `#button-power` with matching indentation.
-- **Idempotent:** the script aborts (changing nothing) if the target already contains the
-  feature.
+- **Inputs are never modified** — the feature is written to `app_record*.` outputs; re-running
+  simply rebuilds them (backing up any existing output to `<file>.bak`).
+- **Idempotent guard:** the script aborts if the *input* already contains the feature.
 - **JSZip:** inlined for `single` (keeps the app self‑contained/offline); referenced as a
   sibling file for `extracted`.
-- Keep `oscilloscope_custom.ttf` (and if desired `favicon.ico`) alongside the HTML (together with
-  `app_extracted.js` when using the extracted pair).
+- **Runtime assets:** keep `oscilloscope_custom.ttf` (custom on‑screen symbols) and `favicon.ico`
+  next to the HTML. For the extracted pair, also keep `app_record_extracted.js` and `jszip.min.js`
+  alongside `app_record_extracted.html`.

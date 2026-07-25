@@ -1,3 +1,6 @@
+=== CLEAN COMPLETE ===
+-> Cleaned & repaired HTML written to: app_clean.html
+
 
 === JS REPORT | Classes: 1 | Methods: 5 | Functions: 174 | Variables: 295 | Leaks: 4 | Mutations: 446 ===
 

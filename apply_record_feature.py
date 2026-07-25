@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-apply_record_feature.py — apply the RECORD/SAVE (.sr export) feature patch.
+apply_record_feature.py — build the RECORD/SAVE (.sr export) feature version.
 
-The feature can be applied to EITHER:
-  * the single self-contained file  app_clean.html          (mode: single)
-  * the extracted pair              app_clean_extracted.js
-                                    app_clean_extracted.html (mode: extracted)
+The pristine inputs are never modified; new output files are written:
+  * mode single    : app_clean.html            -> app_record.html
+  * mode extracted : app_clean_extracted.js    -> app_record_extracted.js
+                     app_clean_extracted.html  -> app_record_extracted.html
 
 The changes are read from record_feature.patch.json (byte-exact insertions).
 JSZip is bundled from the vendored jszip.min.js: inlined for `single`,
-referenced via <script src="jszip.min.js"> for `extracted`.
+referenced via <script src="jszip.min.js"> for `extracted`. In `extracted` the
+output HTML is re-pointed to app_record_extracted.js.
 
 A favicon link (<link rel="icon" href="favicon.ico">) is added right after <head>
 by default; pass -n/--noicon to skip it.
 
-Every file is copied to "<file>.bak" before it is modified.
+If an output file already exists it is copied to "<file>.bak" before being overwritten.
 
 Usage:
     python3 apply_record_feature.py single
@@ -113,60 +114,68 @@ def add_favicon(html, patch):
     return html
 
 
+def write_output(path, text):
+    """Write text to path, backing up an existing output to <path>.bak first."""
+    if os.path.exists(path):
+        backup(path)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(f"  wrote: {os.path.basename(path)}")
+
+
 def process_single(doc_dir, patch, add_icon=True):
-    path = os.path.join(doc_dir, "app_clean.html")
-    if not os.path.exists(path):
-        raise SystemExit(f"ERROR: {path} not found.")
-    html = open(path, encoding="utf-8").read()
+    in_path = os.path.join(doc_dir, "app_clean.html")
+    out_path = os.path.join(doc_dir, "app_record.html")
+    if not os.path.exists(in_path):
+        raise SystemExit(f"ERROR: {in_path} not found.")
+    html = open(in_path, encoding="utf-8").read()
     if patch["js_marker"] in html or patch["record_marker"] in html:
         raise SystemExit("ERROR: app_clean.html already contains the RECORD feature. Aborting (nothing changed).")
-    print("Patching app_clean.html (single, self-contained):")
-    backup(path)
+    print("Building app_record.html (single, self-contained) from app_clean.html:")
     html = apply_js_ops(html, patch["js_ops"])
     html = apply_record_button(html, patch)
     html = inline_jszip(html, doc_dir, patch)
     if add_icon:
         html = add_favicon(html, patch)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(html)
-    print(f"  wrote: {path}")
+    write_output(out_path, html)
+    print("  (input app_clean.html left unchanged)")
 
 
 def process_extracted(doc_dir, patch, add_icon=True):
-    js_path = os.path.join(doc_dir, "app_clean_extracted.js")
-    html_path = os.path.join(doc_dir, "app_clean_extracted.html")
-    for p in (js_path, html_path):
+    in_js = os.path.join(doc_dir, "app_clean_extracted.js")
+    in_html = os.path.join(doc_dir, "app_clean_extracted.html")
+    out_js = os.path.join(doc_dir, "app_record_extracted.js")
+    out_html = os.path.join(doc_dir, "app_record_extracted.html")
+    for p in (in_js, in_html):
         if not os.path.exists(p):
             raise SystemExit(f"ERROR: {p} not found.")
-    js = open(js_path, encoding="utf-8").read()
-    html = open(html_path, encoding="utf-8").read()
+    js = open(in_js, encoding="utf-8").read()
+    html = open(in_html, encoding="utf-8").read()
     if patch["js_marker"] in js or patch["record_marker"] in html:
         raise SystemExit("ERROR: extracted parts already contain the RECORD feature. Aborting (nothing changed).")
 
-    print("Patching app_clean_extracted.js:")
-    backup(js_path)
+    print("Building app_record_extracted.js from app_clean_extracted.js:")
     js = apply_js_ops(js, patch["js_ops"])
-    with open(js_path, "w", encoding="utf-8") as f:
-        f.write(js)
-    print(f"  wrote: {js_path}")
+    write_output(out_js, js)
 
-    print("Patching app_clean_extracted.html:")
-    backup(html_path)
+    print("Building app_record_extracted.html from app_clean_extracted.html:")
     html = apply_record_button(html, patch)
     html = reference_jszip(html, patch)
+    # Re-point the app <script src> from the input JS to the output JS.
+    html = html.replace("app_clean_extracted.js", "app_record_extracted.js")
     if add_icon:
         html = add_favicon(html, patch)
-    with open(html_path, "w", encoding="utf-8") as f:
-        f.write(html)
-    print(f"  wrote: {html_path}")
+    write_output(out_html, html)
+    print("  (inputs left unchanged)")
     print("Note: keep jszip.min.js" + (" and favicon.ico" if add_icon else "") +
-          " next to app_clean_extracted.html so the referenced file(s) resolve.")
+          " next to app_record_extracted.html so the referenced file(s) resolve.")
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Apply the RECORD/SAVE .sr-export feature patch.")
+    ap = argparse.ArgumentParser(description="Build the RECORD/SAVE .sr-export feature version (writes new files; inputs untouched).")
     ap.add_argument("mode", choices=["single", "extracted"],
-                    help="single = patch app_clean.html; extracted = patch app_clean_extracted.js/.html")
+                    help="single = app_clean.html -> app_record.html; "
+                         "extracted = app_clean_extracted.{js,html} -> app_record_extracted.{js,html}")
     ap.add_argument("--dir", default=os.path.dirname(os.path.abspath(__file__)),
                     help="project directory containing the target files (default: this script's directory)")
     ap.add_argument("-n", "--noicon", action="store_true",
