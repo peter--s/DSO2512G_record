@@ -13,10 +13,10 @@ self‑contained `app_clean.html` or to its extracted `app_clean_extracted.js` /
 ## The RECORD feature
 
 ### Using it
-1. Open the app (`app_record.html`, or the patched `app_record_extracted.html`) in Chrome/Edge (Web Serial).
+1. Open the patched app (`app_record.html`, or `app_record_extracted.html`) in Chrome/Edge (Web Serial).
 2. **CONNECT** → pick the serial port and confirm.
 3. **START** — acquisition begins; the **RECORD** button becomes enabled.
-4. Click **RECORD** (it changes to **SAVE** and lights up) to begin capturing frames.
+4. Click **RECORD** to begin capturing frames; the button lights up and changes to **SAVE**.
 5. Adjust the scope as needed; every newly acquired frame is captured.
 6. Click **SAVE** — a `DSO2512G_recording_<timestamp>.sr` file is downloaded.
 7. Open the `.sr` in PulseView.
@@ -137,6 +137,6 @@ Notes:
 - **Idempotent guard:** the script aborts if the *input* already contains the feature.
 - **JSZip:** inlined for `single` (keeps the app self‑contained/offline); referenced as a
   sibling file for `extracted`.
-- **Runtime assets:** keep `oscilloscope_custom.ttf` (custom on‑screen symbols) and `favicon.ico`
-  next to the HTML. For the extracted pair, also keep `app_record_extracted.js` and `jszip.min.js`
-  alongside `app_record_extracted.html`.
+- **Runtime assets:** keep `oscilloscope_custom.ttf` and `favicon.ico` next to the HTML.
+  For the extracted pair, also keep `app_record_extracted.js` and `jszip.min.js` alongside
+  `app_record_extracted.html`.
