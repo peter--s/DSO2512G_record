@@ -5,8 +5,8 @@ oscilloscope is streaming, you can capture the acquired samples and download the
 **sigrok `.sr`** session file that imports directly into **PulseView**.
 
 The feature is delivered as a **patch** that can be applied either to the single
-self‑contained `app_clean.html` or to its extracted `app_clean_extracted.js` /
-`app_clean_extracted.html` pair.
+self‑contained `app_clean.html` (or to its extracted `app_clean_extracted.js` /
+`app_clean_extracted.html` pair).
 
 ---
 
@@ -60,23 +60,26 @@ and the **FRAME** logic channel pulses at each frame boundary.
 
 ---
 
-## Needed Files
+## Involved Files 
+(Needed: **`app_record.html`**, **`oscilloscope_custom.ttf`**, **`favicon.ico`**)
 
 | File | Role |
 |------|------|
-| `DSO2512G-APP-beta10.html` + `oscilloscope_custom.ttf` | Hi‑Ban's app ([EEVblog thread](https://www.eevblog.com/forum/testgear/new-2ch-pocket-dsosg-sigpeak-dso2512g/msg5897308/#msg5897308)); copy the HTML to `app.html`. The `.ttf` provides the custom on‑screen symbols. |
+| `DSO2512G-APP-beta10.html` + **`oscilloscope_custom.ttf`** | Hi‑Ban's app ([EEVblog thread](https://www.eevblog.com/forum/testgear/new-2ch-pocket-dsosg-sigpeak-dso2512g/msg5897308/#msg5897308)); copy the HTML to `app.html`. The `.ttf` provides the custom on‑screen symbols. |
 | `js_analyzer.py` | Cleans/pretty‑prints (`--clean`), analyses, and (`-e`) splits `app.html` into separate JS/HTML — from [peter--s/js_tools](https://github.com/peter--s/js_tools/). |
-| `app_clean.html` | **Pristine** cleaned app (no recording feature); produced by `js_analyzer.py --clean`. |
+| `app_clean.html` | Pristine cleaned app (no recording feature); produced by `js_analyzer.py --clean`. |
 | `app_clean_extracted.js` / `app_clean_extracted.html` | Extracted JS + HTML shell (no recording feature); produced by `js_analyzer.py -e`. |
 | `README.txt` | Structural report (classes, functions, variables, scope leaks, mutations) produced by `js_analyzer.py`. |
-| **`app_record.html`** | The app **with** the recording feature applied (self‑contained). Produced by `apply_record_feature.py single`. |
-| **`app_record_extracted.js` / `app_record_extracted.html`** | The extracted app with the feature applied. Produced by `apply_record_feature.py extracted`. |
-| **`jszip.min.js`** | Stuart Knightley's JSZip 3.10.1 — builds the `.sr` ZIP in‑browser ([dist](https://github.com/Stuk/jszip/tree/main/dist)). |
-| **`record_feature.patch.json`** | The patch definition (byte‑exact insertions). |
-| **`apply_record_feature.py`** | Applies the patch, writing the `app_record*` outputs (inputs untouched). |
+| **`app_record.html`** | The app with the recording feature applied (self‑contained). Produced by `apply_record_feature.py single`. |
+| `app_record_extracted.js` / `app_record_extracted.html` | The extracted app with the recording feature applied. Produced by `apply_record_feature.py extracted`. |
+| `jszip.min.js` | Stuart Knightley's JSZip 3.10.1 — builds the `.sr` ZIP in‑browser ([dist](https://github.com/Stuk/jszip/tree/main/dist)). |
+| `record_feature.patch.json` | The patch definition (byte‑exact insertions). |
+| `apply_record_feature.py` | Applies the patch, writing the `app_record*` outputs (inputs untouched). |
 | **`favicon.ico`** | DSO icon created with piskelapp.com and xsukax‑Favicon‑Generator. Helps finding the right tab when you opened too many. |
 
-### Generating the baseline using js_tools
+---
+
+## Generating the baseline using js_tools
 
 `js_analyzer.py` needs `beautifulsoup4` + `esprima` (plus `jsbeautifier` for `--clean`).
 
@@ -93,7 +96,7 @@ cp DSO2512G-APP-beta10.html app.html
 python3 js_analyzer.py app.html --clean -e -n -g -u > README.txt
 #   --clean -> app_clean.html                            (pretty-printed, title-bar layout repaired)
 #   then -e -> app_clean_extracted.js / .html            (extracted from the cleaned file)
-#   report  -> README.txt
+#   report  -> README.txt                                (functions, variables, classes, scope leaks, global mutations)
 
 deactivate                           # (optional) leave the venv
 ```
@@ -106,7 +109,7 @@ that `prettify()` strips — is applied to both the cleaned HTML and the extract
 
 ## The patching script
 
-`apply_record_feature.py` reads `record_feature.patch.json` and builds the feature version as
+`apply_record_feature.py` reads `record_feature.patch.json` and builds the recording feature version as
 **new output files, never modifying the pristine inputs** (an existing output is copied to
 `<file>.bak` before it is overwritten). An icon is added to the html header unless `-n` or
 `--noicon` is passed.
@@ -129,14 +132,14 @@ python3 apply_record_feature.py single --noicon
 ```
 
 Notes:
-- The JS insertions are matched by **unique code anchors**, which are identical in the inline
-  `<script>` of `app_clean.html` and in `app_clean_extracted.js`, so the same patch applies
-  to both. The RECORD button is inserted after `#button-power` with matching indentation.
-- **Inputs are never modified** — the feature is written to `app_record*.` outputs; re-running
-  simply rebuilds them (backing up any existing output to `<file>.bak`).
-- **Idempotent guard:** the script aborts if the *input* already contains the feature.
-- **JSZip:** inlined for `single` (keeps the app self‑contained/offline); referenced as a
-  sibling file for `extracted`.
 - **Runtime assets:** keep `oscilloscope_custom.ttf` and `favicon.ico` next to the HTML.
   For the extracted pair, also keep `app_record_extracted.js` and `jszip.min.js` alongside
   `app_record_extracted.html`.
+- The JS insertions are matched by **unique code anchors**, which are identical in the inline
+  `<script>` of `app_clean.html` and in `app_clean_extracted.js`, so the same patch applies
+  to both. The RECORD button is inserted after `#button-power` with matching indentation.
+- Inputs are never modified — the feature is written to `app_record*.` outputs; re-running
+  simply rebuilds them (backing up any existing output to `<file>.bak`).
+- Idempotent guard: the script aborts if the *input* already contains the feature.
+- **JSZip:** inlined for `single` (keeps the app self‑contained/offline); referenced as a
+  sibling file for `extracted`.
