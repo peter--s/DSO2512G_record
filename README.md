@@ -22,41 +22,104 @@ self‑contained `app_clean.html` (or to its extracted `app_clean_extracted.js` 
 7. Open the `.sr` in PulseView.
 
 ### What is recorded
-- **Values:** calibrated voltage (V) — the `convertToWaveArray()` output, taken *before*
-  interpolation (the raw acquired samples, matching the app's computed sample rate).
-- **Channels:** CH1 always; CH2 additionally when it is enabled at RECORD start.
+- **Values:** calibrated volts. The acquired samples are raw screen positions, so the
+  channel's V/div and vertical position are applied at export:
+
+  ```
+  volts = (raw − vertical_position) × 8 × volts_per_div
+  ```
+
+  There is no unit field in the `.sr` format to say otherwise — libsigrok's session reader
+  hard‑codes `SR_MQ_VOLTAGE` / `SR_UNIT_VOLT`, so these floats *are* volts to anything that
+  opens them. Both terms are taken **per frame**, so adjusting the scope mid‑recording does
+  not corrupt the frames that follow.
+- **Channels:** CH1 always; CH2 whenever any captured frame has CH2 samples (decided at
+  SAVE, so enabling CH2 part‑way through a recording keeps it).
 - **One frame per real acquisition:** capture is gated by the app's existing new‑frame
   detector (`trackBufferChangeTime` → `appParam_bufferUpdated`), so duplicate render ticks
-  and backup‑fallback redraws are not recorded.
+  and backup‑fallback redraws are not recorded. Samples are taken before filtering,
+  averaging and interpolation, but after the demo‑mode override.
+- **Real elapsed time.** An oscilloscope does not produce a continuous sample stream: each
+  frame is a separate triggered acquisition. Frames are placed at their true wall‑clock
+  offsets and the dead time between them is filled with NaN, which PulseView shows as
+  absent data. The gaps are the frame boundaries, so there is no marker channel.
 
 ### `.sr` file layout (sigrok v2, matches libsigrok `srzip`)
 ```
-version                 -> "2"
-metadata                -> INI: [global] sigrok version ; [device 1] samplerate,
-                           capturefile=logic-1, total probes=1, probe1=FRAME, unitsize=1,
-                           total analog=1|2, analog2=CH1, analog3=CH2
-logic-1-<n>             -> FRAME marker channel (1 byte/sample; 0x01 on each frame's first sample)
-analog-1-2-<n>          -> CH1 samples, little-endian float32
-analog-1-3-<n>          -> CH2 samples (only when CH2 recorded), little-endian float32
+version                   -> "2"
+metadata                  -> INI: [global] sigrok version ; [device 1] samplerate,
+                             total analog=1|2, analog1=CH1, analog2=CH2
+analog-1-1-<n>            -> CH1 samples in volts, little-endian float32
+analog-1-2-<n>            -> CH2 samples in volts (only when CH2 was recorded)
+dso2512g-recording.json   -> settings sidecar (ignored by libsigrok/PulseView)
 ```
-Each acquired frame is its own chunk `<n>`; PulseView concatenates them on one timeline,
-and the **FRAME** logic channel pulses at each frame boundary.
+Chunks `<n>` run contiguously from 1 and alternate between gaps and frames; the reader
+stops at the first missing chunk, so the numbering must have no holes.
+
+The **sidecar** carries everything `.sr` has no room for — per frame: start offset, length,
+preceding gap, trigger sample index, timebase, and both channels' V/div, vertical position,
+probe factor, coupling and bandwidth limit, plus the trigger source, slope and level. It
+also records `samplerate_exact` (metadata rounds to whole Hz) and the app's
+`verticalOffsetCH1/CH2` calibration constants, which stay baked into every sample because
+they are what makes the export agree with the scope's own on‑screen readouts.
 
 ### Limitations
-- `.sr` carries a **single** samplerate, captured at RECORD start — changing the time/div
-  mid‑recording is not reflected in the exported samplerate.
-- Frames are independently triggered (~100 ms apart in wall‑clock time); they are presented
-  as one contiguous timeline with the FRAME markers indicating boundaries.
-- The recorded channel set (CH1, or CH1+CH2) is fixed at RECORD start.
+- **Frame placement is accurate to about one acquisition interval.** The timestamp is when
+  the frame was *received*, not when it was triggered. The export reconstructs *when* frames
+  happened; it is not a continuous record of the signal.
+- **At slow timebases the gaps disappear.** A frame spans 12 × time/div of signal but
+  arrives every few hundred ms, so from roughly 50 ms/div upward frames overlap in
+  wall‑clock time and are laid back to back. The count is logged and recorded in the sidecar.
+- **Very long or very fast recordings drop the gaps.** Gap filling is budgeted on
+  uncompressed samples; beyond the budget the frames are concatenated, the sidecar reports
+  `"mode": "concatenated"`, and the app says so on screen.
+- **`.sr` carries a single samplerate.** Changing the time/div mid‑recording splits the
+  export into one `…_seg<k>.sr` per samplerate run, because `srzip` has no way to store
+  segments and one file cannot describe both rates correctly.
+- **Bit‑identical frames are deduplicated.** New frames are detected by comparing the raw
+  buffer, so a perfectly static signal with no noise can look like a gap that should not be
+  there.
+
+> **Changed in this version:** samples are now volts rather than normalised screen positions,
+> and dropping the FRAME channel moved CH1/CH2 from `analog-1-2`/`analog-1-3` down to
+> `analog-1-1`/`analog-1-2`. Tooling that reads the entries by name needs updating; the
+> sidecar's `channels[].entry_base` gives the names for a given file, and its `format` key
+> distinguishes new exports from old ones.
 
 ### How it works (code)
 - New globals (`appParam_isRecording`, `appParam_bufferUpdated`, `recPendingCH1/CH2`,
-  `recordedFrames`, `recordSampleRate`, `recordCH2Enabled`).
-- `trackBufferChangeTime()` raises `appParam_bufferUpdated` on each genuinely new frame.
-- `processWaveforms()` snapshots the pre‑interpolation CH1/CH2 volts.
+  `recPendingSettings`, `recPendingTime`, `recordedFrames`, `recordSampleRate`).
+- `trackBufferChangeTime()` raises `appParam_bufferUpdated` and timestamps the frame.
+- `processWaveforms()` snapshots the raw pre‑interpolation samples together with
+  `recSnapshotSettings()` — the V/div, vertical position and trigger state of that frame.
 - `doIteration()` commits one frame after `processWaveforms()` and clears the flag.
-- `toggleRecording()` / `exportRecordingSR()` build and download the `.sr` via JSZip.
+- `toggleRecording()` → `exportRecordingSR()` → `exportRecordingSegment()` build and
+  download the `.sr` via JSZip; `recToVolts()` does the conversion and
+  `planRecordingTimeline()` decides where each frame sits.
 - The RECORD button is enabled/disabled in `startPlotting()` / `stopPlotting()`.
+
+### Tests
+
+```bash
+/usr/bin/python3 -m unittest discover -s tests -v
+```
+
+Standard library only — no npm, no pip. The suite pins `app_record.html` against the patch
+(byte for byte), checks the `.sr` structural invariants libsigrok depends on, and pins the
+volts conversion against two real captures showing the same ~312 V bus at 50 V/div and at
+100 V/div. Where a JavaScript engine is available (`jsc` on macOS, otherwise `node` or
+`d8`) it also parses the generated app and exercises the export helpers directly; without
+one those tests skip. Tests needing `app_clean.html` skip too, since it is not in the repo.
+
+To check an export you produced yourself:
+
+```bash
+DSO2512G_SR=~/Downloads/DSO2512G_recording_20260826T101500.sr \
+    /usr/bin/python3 -m unittest discover -s tests
+```
+
+`tests/ACCEPTANCE.md` has the hardware procedure using the scope's built‑in generator.
+`tests/srlib.py` doubles as a CLI for inspecting a file: `python3 tests/srlib.py FILE.sr`.
 
 ---
 
