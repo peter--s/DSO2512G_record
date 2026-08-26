@@ -13,12 +13,12 @@
     },
     {
       "name": "snapshot_ch1",
-      "anchor": "CH1rawPoints = convertToWaveArray(currentCH1Data);",
+      "anchor": "appParam_sampleRate = appParam_sampleRate > 100000000 ? 100000000 : appParam_sampleRate;\n            }\n        }",
       "payload_file": "patch/snapshot_ch1.js"
     },
     {
       "name": "snapshot_ch2",
-      "anchor": "CH2rawPoints = convertToWaveArrayCH2(currentCH2Data);",
+      "anchor": "CH2rawPoints = generateWaveformData(appParam_demoMode_CH2shape, parseFloat(appParam_demoMode_CH2noise), parseInt(appParam_demoMode_CH2cycles), parseFloat(appParam_demoMode_CH2amplitude), parseInt(appParam_demoMode_CH2phase), parseInt(appParam_demoMode_CH2samples));\n            }",
       "payload_file": "patch/snapshot_ch2.js"
     },
     {

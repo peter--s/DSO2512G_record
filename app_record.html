@@ -5808,10 +5808,6 @@ function processWaveforms() {
         // Process Channel 1 data (always enabled) -----------------------------------------------------------------------------
         CH1rawPoints = convertToWaveArray(currentCH1Data);
 
-        // Recording: snapshot the raw acquired (pre-interpolation) calibrated volts before further processing overwrites CH1rawPoints.
-        recPendingCH2 = null;
-        if (appParam_isRecording && appParam_bufferUpdated) recPendingCH1 = CH1rawPoints.slice();
-
         //TEST WAVEFORM - DEMO MODE - FOR TESTING - OVERRIDES CH1 INPUT
         if (appParam_demoMode_Enabled == 'ON') {
             appParam_demoMode_CH1shape = document.getElementById('ch1-shape').value;
@@ -5834,6 +5830,12 @@ function processWaveforms() {
                 appParam_sampleRate = appParam_sampleRate > 100000000 ? 100000000 : appParam_sampleRate;
             }
         }
+
+        // Recording: snapshot the raw acquired frame (pre-filter, pre-averaging, pre-interpolation).
+        // Anchored after the demo-mode override and after appParam_sampleRate has been recomputed,
+        // so demo waveforms are captured too and the rate belongs to this frame.
+        recPendingCH2 = null;
+        if (appParam_isRecording && appParam_bufferUpdated) recPendingCH1 = CH1rawPoints.slice();
 
         // Apply low pass filter (if enabled)
         if (appParam_CH1BWLimit == 'ON') {
@@ -5863,9 +5865,6 @@ function processWaveforms() {
         if (param_CH2enabled === 1) {
             CH2rawPoints = convertToWaveArrayCH2(currentCH2Data);
 
-            // Recording: snapshot the raw acquired (pre-interpolation) CH2 volts before further processing.
-            if (appParam_isRecording && appParam_bufferUpdated) recPendingCH2 = CH2rawPoints.slice();
-
             //TEST WAVEFORM - DEMO MODE - FOR TESTING - OVERRIDES CH2 INPUT
             if (appParam_demoMode_Enabled == 'ON') {
                 appParam_demoMode_CH2shape = document.getElementById('ch2-shape').value;
@@ -5876,6 +5875,10 @@ function processWaveforms() {
                 appParam_demoMode_CH2samples = document.getElementById('ch2-samples').value;
                 CH2rawPoints = generateWaveformData(appParam_demoMode_CH2shape, parseFloat(appParam_demoMode_CH2noise), parseInt(appParam_demoMode_CH2cycles), parseFloat(appParam_demoMode_CH2amplitude), parseInt(appParam_demoMode_CH2phase), parseInt(appParam_demoMode_CH2samples));
             }
+
+            // Recording: snapshot the raw acquired CH2 frame, anchored after the demo-mode
+            // override for the same reason as CH1.
+            if (appParam_isRecording && appParam_bufferUpdated) recPendingCH2 = CH2rawPoints.slice();
 
             // Apply low pass filter (if enabled)
             if (appParam_CH2BWLimit == 'ON') {
