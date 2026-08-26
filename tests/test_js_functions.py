@@ -188,6 +188,71 @@ class TestMetadataLayout(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestSidecar(unittest.TestCase):
+    """The sidecar carries everything .sr has no room for, so its shape is worth pinning."""
+
+    def _sidecar(self):
+        harness = recording_source() + (
+            "\nvar mk = function (t, vpd1, vpos1) {\n"
+            "  return {ch1: new Array(4).fill(0.25), ch2: new Array(4).fill(0.1),\n"
+            "          s: {t: t, sr: 20000, tpd: 0.001, len: 4, trigIdx: 2, src: 'DataBuffer',\n"
+            "              demo: false, acq: 'Normal',\n"
+            "              ch1: {vpd: vpd1, vpos: vpos1, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "              ch2: {on: true, vpd: 100, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "              trig: {src: 'CH2', mode: 'Auto', edge: 'falling', level: -8}}};\n"
+            "};\n"
+            "var frames = [mk(1000, 50, -0.41), mk(1500, 100, 0.25)];\n"
+            "recordSampleRate = 20000;\n"
+            "var tl = planRecordingTimeline(frames, 20000);\n"
+            "__emit(JSON.stringify(buildRecordingSidecar(tl, true, [], 1, 1)));\n"
+        )
+        return run_js_json(harness)
+
+    def test_channels_point_at_the_real_entry_names(self):
+        """Whoever reads the sidecar must be able to find the samples it describes."""
+        sc = self._sidecar()
+        self.assertEqual([c["entry_base"] for c in sc["channels"]],
+                         ["analog-1-1", "analog-1-2"])
+        self.assertEqual([c["unit"] for c in sc["channels"]], ["V", "V"])
+
+    def test_frame_offsets_account_for_every_sample(self):
+        """Frame lengths plus gaps must tile the timeline exactly, with no overlap."""
+        sc = self._sidecar()
+        total = sum(f["length"] + f["gap_before"] for f in sc["frames"])
+        self.assertEqual(total, sc["sample_count"])
+        for prev, nxt in zip(sc["frames"], sc["frames"][1:]):
+            self.assertEqual(nxt["start_sample"],
+                             prev["start_sample"] + prev["length"] + nxt["gap_before"])
+
+    def test_per_frame_settings_are_recorded_independently(self):
+        """A mid-recording V/div or position change must be visible frame by frame."""
+        sc = self._sidecar()
+        self.assertEqual([f["ch1"]["vpd"] for f in sc["frames"]], [50, 100])
+        self.assertEqual([f["ch1"]["vpos"] for f in sc["frames"]], [-0.41, 0.25])
+
+    def test_exact_samplerate_survives_the_integer_hz_format(self):
+        """metadata rounds to whole Hz; the sidecar keeps what was measured."""
+        harness = recording_source() + (
+            "\nrecordSampleRate = 92.593;\n"
+            "var tl = planRecordingTimeline([], 92.593);\n"
+            "var sc = buildRecordingSidecar(tl, false, [], 1, 1);\n"
+            "__emit(JSON.stringify({exact: sc.samplerate_exact, rounded: sc.samplerate,"
+            " str: sc.samplerate_string, meta: buildRecordingMetadata(92.593, false)}));\n"
+        )
+        r = run_js_json(harness)
+        self.assertAlmostEqual(r["exact"], 92.593, places=6)
+        self.assertEqual(r["rounded"], 93)
+        self.assertIn("samplerate=93 Hz", r["meta"])
+
+    def test_calibration_constants_are_disclosed(self):
+        """They stay baked into every sample, so say so rather than hiding it."""
+        sc = self._sidecar()
+        self.assertEqual(sc["app_calibration"]["verticalOffsetCH1"], 0.005)
+        self.assertEqual(sc["app_calibration"]["verticalOffsetCH2"], 0.008)
+        self.assertIn("volts", sc["volts_formula"])
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
 class TestNaNGapEncoding(unittest.TestCase):
     def test_gap_bytes_are_float32_nan(self):
         """Gap runs must be real IEEE-754 NaN, little-endian, 4 bytes per sample."""

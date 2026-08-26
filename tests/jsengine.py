@@ -95,5 +95,6 @@ def recording_source(emit_trigger_channel=False):
         "var appParam_CH1BWLimit = 'OFF', appParam_CH2BWLimit = 'OFF';\n"
         "var param_triggerCH1CH2 = 0, param_triggerEdge = 0, appParam_triggerMode = 'Auto';\n"
         "var isPlotting = false;\n"
+        "const verticalScale = 1, verticalOffsetCH1 = 0.005, verticalOffsetCH2 = 0.008;\n"
     )
     return stubs + src

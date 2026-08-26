@@ -193,6 +193,84 @@ function recordingTimestamp() {
     return "" + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + "T" + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
 }
 
+// Builds the companion settings file carried inside the .sr.
+//
+// The sigrok session format has room for a samplerate, channel names and nothing else - no
+// V/div, no coupling, no probe factor, no trigger, no per-frame anything. libsigrok looks its
+// zip entries up by name and never enumerates the archive, so an extra entry is ignored by
+// PulseView while still travelling with the capture. Everything the format cannot express,
+// and everything needed to check the conversion after the fact, goes here.
+function buildRecordingSidecar(timeline, ch2Enabled, warnings, segIndex, segCount) {
+    const chan = (nth, name) => ({ name: name, entry_base: recordAnalogBase(nth), unit: "V" });
+    const chanSettings = (cfg) => ({
+        vpd: cfg.vpd, vpos: cfg.vpos, probe: cfg.probe, coupling: cfg.coupling, bwlimit: cfg.bw
+    });
+
+    const frames = timeline.plan.map((p, i) => {
+        const s = p.frame.s || {};
+        const out = {
+            n: i + 1,
+            start_sample: p.start,
+            length: p.len,
+            gap_before: p.gap,
+            t_ms: s.t !== undefined ? (s.t - timeline.t0) : null,
+            trigger_sample: s.trigIdx !== undefined ? s.trigIdx : null,
+            samplerate: s.sr, tpd: s.tpd,
+            signal_source: s.src, demo: s.demo, acquisition_mode: s.acq
+        };
+        if (s.ch1) out.ch1 = chanSettings(s.ch1);
+        if (s.ch2) {
+            out.ch2 = chanSettings(s.ch2);
+            out.ch2.present = !!(p.frame.ch2 && p.frame.ch2.length > 0);
+        }
+        if (s.trig) {
+            out.trigger = { source: s.trig.src, mode: s.trig.mode, edge: s.trig.edge, level_v: s.trig.level };
+        }
+        return out;
+    });
+
+    const channels = [chan(1, "CH1")];
+    if (ch2Enabled) channels.push(chan(2, "CH2"));
+
+    return {
+        format: "dso2512g-recording/1",
+        generator: "DSO2512G web app - RECORD/SAVE",
+        created: new Date().toISOString(),
+        segment: { index: segIndex, count: segCount },
+
+        // .sr stores the samplerate as an integer number of Hz, so a rate like 92.593 Hz is
+        // written as "92 Hz". Keep the unrounded value for anyone reconstructing timing.
+        samplerate: Math.round(recordSampleRate),
+        samplerate_exact: recordSampleRate,
+        samplerate_string: formatSamplerate(recordSampleRate),
+
+        sample_count: timeline.total,
+        frame_count: frames.length,
+
+        timeline: {
+            mode: timeline.mode,
+            gap_fill: "NaN",
+            clamped_frames: timeline.clamped,
+            max_samples: recordMaxTimelineSamples,
+            note: "Frame times are arrival timestamps, so placement is accurate to about one acquisition interval."
+        },
+
+        // Baked into every sample by convertToWaveArray(); recorded so downstream analysis can
+        // account for them. They are what makes the export agree with the scope's own readouts,
+        // so they are deliberately not removed.
+        app_calibration: {
+            verticalScale: verticalScale,
+            verticalOffsetCH1: verticalOffsetCH1,
+            verticalOffsetCH2: verticalOffsetCH2
+        },
+        volts_formula: "volts = (raw - vpos) * 8 * vpd",
+
+        channels: channels,
+        frames: frames,
+        warnings: warnings || []
+    };
+}
+
 // Builds the .sr ZIP (via JSZip) from recordedFrames and triggers a download.
 //
 // Frames are laid out at their real wall-clock offsets with the dead time between acquisitions
@@ -261,13 +339,18 @@ function exportRecordingSR() {
         emitChunk(ch1Bytes, ch2Bytes, p.len, s.trigIdx);
     }
 
+    const warnings = [];
     if (timeline.mode === "concatenated") {
-        log("WARNING: timeline would need " + timeline.total + " samples/channel; gaps dropped, frames concatenated.");
+        warnings.push("Timeline exceeded " + recordMaxTimelineSamples + " samples/channel; gaps dropped and frames concatenated.");
+        log("WARNING: " + warnings[warnings.length - 1]);
         showMessage("Recording too long for a real timeline - frames concatenated", "ALL");
     } else if (timeline.clamped > 0) {
-        log("NOTE: " + timeline.clamped + " frame(s) overlapped in wall-clock time and were placed back to back. " +
-            "A frame spans 12 x time/div of signal, which at slow timebases exceeds the interval between acquisitions.");
+        warnings.push(timeline.clamped + " frame(s) overlapped in wall-clock time and were placed back to back.");
+        log("NOTE: " + warnings[warnings.length - 1] + " A frame spans 12 x time/div of signal, " +
+            "which at slow timebases exceeds the interval between acquisitions.");
     }
+    zip.file("dso2512g-recording.json",
+        JSON.stringify(buildRecordingSidecar(timeline, recAnyCH2, warnings, 1, 1), null, 2));
 
     const filename = "DSO2512G_recording_" + recordingTimestamp() + ".sr";
     zip.generateAsync({ type: "blob", compression: "DEFLATE" }).then((blob) => {
