@@ -204,7 +204,7 @@ class TestSidecar(unittest.TestCase):
             "var frames = [mk(1000, 50, -0.41), mk(1500, 100, 0.25)];\n"
             "recordSampleRate = 20000;\n"
             "var tl = planRecordingTimeline(frames, 20000);\n"
-            "__emit(JSON.stringify(buildRecordingSidecar(tl, true, [], 1, 1)));\n"
+            "__emit(JSON.stringify(buildRecordingSidecar(tl, true, [], 1, 1, 20000)));\n"
         )
         return run_js_json(harness)
 
@@ -235,7 +235,7 @@ class TestSidecar(unittest.TestCase):
         harness = recording_source() + (
             "\nrecordSampleRate = 92.593;\n"
             "var tl = planRecordingTimeline([], 92.593);\n"
-            "var sc = buildRecordingSidecar(tl, false, [], 1, 1);\n"
+            "var sc = buildRecordingSidecar(tl, false, [], 1, 1, 92.593);\n"
             "__emit(JSON.stringify({exact: sc.samplerate_exact, rounded: sc.samplerate,"
             " str: sc.samplerate_string, meta: buildRecordingMetadata(92.593, false)}));\n"
         )
@@ -250,6 +250,39 @@ class TestSidecar(unittest.TestCase):
         self.assertEqual(sc["app_calibration"]["verticalOffsetCH1"], 0.005)
         self.assertEqual(sc["app_calibration"]["verticalOffsetCH2"], 0.008)
         self.assertIn("volts", sc["volts_formula"])
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestSamplerateSplitting(unittest.TestCase):
+    """A .sr holds one samplerate and srzip has no segments, so a time/div change
+    mid-recording has to become separate files rather than a misdescribed one."""
+
+    def _split(self, rates):
+        frames = [{"ch1": [0], "s": {"sr": r}} for r in rates]
+        harness = recording_source() + (
+            "\nvar runs = splitRecordingBySamplerate(%s);\n"
+            "__emit(JSON.stringify(runs.map(function (r) {"
+            " return {rate: r.sampleRate, n: r.frames.length}; })));\n" % json.dumps(frames)
+        )
+        return run_js_json(harness)
+
+    def test_constant_rate_stays_one_file(self):
+        self.assertEqual(self._split([20000] * 5), [{"rate": 20000, "n": 5}])
+
+    def test_rate_change_splits(self):
+        self.assertEqual(self._split([20000, 20000, 50000, 50000, 50000]),
+                         [{"rate": 20000, "n": 2}, {"rate": 50000, "n": 3}])
+
+    def test_returning_to_an_earlier_rate_is_a_new_run(self):
+        """Runs are consecutive, not grouped: going back to 20 kHz starts a third file,
+        because the frames in between belong elsewhere on the timeline."""
+        self.assertEqual(self._split([20000, 50000, 20000]),
+                         [{"rate": 20000, "n": 1}, {"rate": 50000, "n": 1},
+                          {"rate": 20000, "n": 1}])
+
+    def test_every_frame_is_kept(self):
+        rates = [20000, 20000, 40000, 20000, 80000, 80000]
+        self.assertEqual(sum(r["n"] for r in self._split(rates)), len(rates))
 
 
 @unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
