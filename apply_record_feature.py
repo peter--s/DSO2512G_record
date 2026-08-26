@@ -96,7 +96,8 @@ def apply_record_button(html, patch):
 def inline_jszip(html, doc_dir, patch):
     """single mode: inline jszip.min.js just before the app's inline <script>."""
     jz = patch["jszip"]
-    lib = open(os.path.join(doc_dir, jz["vendor_file"]), encoding="utf-8").read().rstrip("\n")
+    with open(os.path.join(doc_dir, jz["vendor_file"]), encoding="utf-8") as f:
+        lib = f.read().rstrip("\n")
     marker = "  </style>\n  <script>"
     if html.count(marker) != 1:
         raise SystemExit("ERROR: could not locate the '</style> + <script>' insertion point. Aborting.")
@@ -153,7 +154,8 @@ def process_single(doc_dir, patch, add_icon=True):
     out_path = os.path.join(doc_dir, "app_record.html")
     if not os.path.exists(in_path):
         raise SystemExit(f"ERROR: {in_path} not found.")
-    html = open(in_path, encoding="utf-8").read()
+    with open(in_path, encoding="utf-8") as f:
+        html = f.read()
     if patch["js_marker"] in html or patch["record_marker"] in html:
         raise SystemExit("ERROR: app_clean.html already contains the RECORD feature. Aborting (nothing changed).")
     print("Building app_record.html (single, self-contained) from app_clean.html:")
@@ -174,8 +176,10 @@ def process_extracted(doc_dir, patch, add_icon=True):
     for p in (in_js, in_html):
         if not os.path.exists(p):
             raise SystemExit(f"ERROR: {p} not found.")
-    js = open(in_js, encoding="utf-8").read()
-    html = open(in_html, encoding="utf-8").read()
+    with open(in_js, encoding="utf-8") as f:
+        js = f.read()
+    with open(in_html, encoding="utf-8") as f:
+        html = f.read()
     if patch["js_marker"] in js or patch["record_marker"] in html:
         raise SystemExit("ERROR: extracted parts already contain the RECORD feature. Aborting (nothing changed).")
 
