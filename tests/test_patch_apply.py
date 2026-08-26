@@ -22,7 +22,7 @@ import unittest
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # sha256 of the committed app_record.html, reproduced from the current build inputs.
-BASELINE_SHA256 = "76299b90a603224d49a3c764731970ffc48a7b122e039d269e72c29d25aa9ddf"
+BASELINE_SHA256 = "ec1712cb47e615d13e12ff788211597765036514f999252b648eb434d311814c"
 
 ARTIFACT = os.path.join(REPO, "app_record.html")
 PATCH_JSON = os.path.join(REPO, "record_feature.patch.json")
@@ -151,10 +151,11 @@ class TestPatchOps(unittest.TestCase):
                           "payload for %r is not directly after its anchor" % op["name"])
 
     def test_payload_brackets_balance(self):
-        """Cheap stand-in for a JS parser: brackets balance across all payloads.
+        """Brackets balance across all payloads.
 
-        A syntax error in a payload blanks the whole app, and there is no node here,
-        so this catches the most common way to break one.
+        test_js_functions.py parses the payloads properly wherever a JS engine is
+        available; this is the fallback that still runs when none is. A syntax error
+        blanks the whole app rather than failing loudly, so it is worth two checks.
         """
         code = strip_js("\n".join(op_payload(op) for op in self.ops))
         for opener, closer in (("{", "}"), ("(", ")"), ("[", "]")):

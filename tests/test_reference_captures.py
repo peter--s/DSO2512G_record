@@ -18,7 +18,10 @@ y=636, 117 px/division, 8 divisions = 936 px over the full scale).
 """
 import math
 import os
+import sys
 import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # sibling imports under -m and discover
 
 from srlib import SrFile
 

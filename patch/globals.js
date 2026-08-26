@@ -9,3 +9,6 @@ let recPendingSettings = null; // acquisition settings in force for the frame be
 let recPendingTime = 0; // performance.now() when the current new frame was detected
 let recordedFrames = []; // array of captured frames: { ch1: number[], ch2: number[]|null, s: settings }
 let recordSampleRate = 1; // samplerate captured at RECORD start (Sa/s); .sr carries a single samplerate
+const recordEmitTriggerChannel = false; // true -> also emit a TRIG logic channel (shifts CH1/CH2 to analog-1-2/3)
+const recordMaxTimelineSamples = 20000000; // per channel; above this, gaps are dropped and frames concatenated
+const recordGapChunkSamples = 1048576; // gap runs are split into chunks of this many samples (libsigrok's CHUNKSIZE)
