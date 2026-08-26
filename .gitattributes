@@ -1,0 +1,5 @@
+# Payloads are byte-exact insertions and the artifact is compared byte-for-byte,
+# so line endings must never be translated on checkout.
+patch/*.js                text eol=lf
+record_feature.patch.json text eol=lf
+app_record.html           text eol=lf
