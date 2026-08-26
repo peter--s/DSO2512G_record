@@ -15,7 +15,8 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # sibling imports under -m and discover
 
-from jsengine import NO_ENGINE, find_engine, recording_source, run_js_json
+from jsengine import (NO_ENGINE, find_engine, recording_source,
+                      recording_source_with_zip, run_js_json)
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ARTIFACT = os.path.join(REPO, "app_record.html")
@@ -296,6 +297,101 @@ class TestNaNGapEncoding(unittest.TestCase):
         self.assertEqual(len(raw), 12)
         for value in struct.unpack("<3f", raw):
             self.assertTrue(math.isnan(value))
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestExportEmitsAWellFormedArchive(unittest.TestCase):
+    """Runs the real export loop against a JSZip stub.
+
+    This is the part with no second chance: libsigrok walks base-1, base-2, ... and
+    stops at the first missing chunk, and it aligns channels by total sample count.
+    Get either wrong and the capture truncates or the channels slide apart, both
+    silently.
+    """
+
+    def _export(self, gaps_ms, length=4, samplerate=20000, ch2=True, trig_channel=False):
+        mk = ("function mk(t) { return {"
+              "ch1: new Array(%d).fill(0.25), ch2: %s,"
+              "s: {t: t, sr: %d, tpd: 0.001, len: %d, trigIdx: 1, src: 'DataBuffer',"
+              "    demo: false, acq: 'Normal',"
+              "    ch1: {vpd: 50, vpos: -0.41, probe: '10x', coupling: 'DC', bw: 'OFF'},"
+              "    ch2: {on: true, vpd: 100, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},"
+              "    trig: {src: 'CH2', mode: 'Auto', edge: 'falling', level: -8}}}; }\n"
+              % (length, ("new Array(%d).fill(0.1)" % length) if ch2 else "null", samplerate, length))
+        harness = recording_source_with_zip(emit_trigger_channel=trig_channel) + mk + (
+            "recordSampleRate = %d;\n"
+            "var frames = %s.map(mk);\n"
+            "exportRecordingSegment(frames, %d, 1, 1, 'STAMP');\n"
+            "__emit(JSON.stringify(__written));\n" % (samplerate, json.dumps(gaps_ms), samplerate)
+        )
+        return run_js_json(harness)
+
+    @staticmethod
+    def _chunks(written, base):
+        out = {}
+        for entry in written:
+            if entry["name"].startswith(base + "-"):
+                out[int(entry["name"].rsplit("-", 1)[1])] = entry["size"]
+        return out
+
+    def test_chunk_numbers_are_contiguous_from_one(self):
+        written = self._export([0.0, 500.0, 1000.0])
+        nums = sorted(self._chunks(written, "analog-1-1"))
+        self.assertEqual(nums, list(range(1, len(nums) + 1)))
+
+    def test_channels_stay_in_lockstep(self):
+        """Same chunk count and same byte count per chunk, so the totals cannot drift."""
+        written = self._export([0.0, 500.0, 1000.0])
+        ch1 = self._chunks(written, "analog-1-1")
+        ch2 = self._chunks(written, "analog-1-2")
+        self.assertEqual(sorted(ch1), sorted(ch2))
+        self.assertEqual(ch1, ch2)
+        self.assertEqual(sum(ch1.values()), sum(ch2.values()))
+
+    def test_total_samples_match_the_planned_timeline(self):
+        """Frames 500 ms apart at 20 kSa/s: 4 samples each, 9996-sample gaps between."""
+        written = self._export([0.0, 500.0, 1000.0])
+        total_bytes = sum(self._chunks(written, "analog-1-1").values())
+        self.assertEqual(total_bytes // 4, 4 + 9996 + 4 + 9996 + 4)
+
+    def test_long_gaps_are_split_into_bounded_chunks(self):
+        """A gap wider than the chunk limit becomes several chunks, still contiguous."""
+        written = self._export([0.0, 200000.0])  # 200 s at 20 kSa/s = 4M samples, under the budget
+        chunks = self._chunks(written, "analog-1-1")
+        self.assertEqual(sorted(chunks), list(range(1, len(chunks) + 1)))
+        for size in chunks.values():
+            self.assertLessEqual(size // 4, 1048576)
+        self.assertGreater(len(chunks), 4, "a 4M-sample gap should span several chunks")
+
+    def test_purely_analog_export_writes_no_logic_entries(self):
+        written = self._export([0.0, 500.0])
+        names = [e["name"] for e in written]
+        self.assertFalse([n for n in names if n.startswith("logic-")])
+        self.assertIn("version", names)
+        self.assertIn("metadata", names)
+        self.assertIn("dso2512g-recording.json", names)
+
+    def test_trigger_channel_variant_matches_analog_chunking(self):
+        """With the fallback flag on, the logic channel must be chunked identically."""
+        written = self._export([0.0, 500.0], trig_channel=True)
+        logic = self._chunks(written, "logic-1")
+        ch1 = self._chunks(written, "analog-1-2")
+        self.assertEqual(sorted(logic), sorted(ch1))
+        # 1 byte per sample against 4, so the logic channel spans the same samples.
+        self.assertEqual(sum(logic.values()), sum(ch1.values()) // 4)
+
+    def test_single_channel_export_omits_ch2_entries(self):
+        written = self._export([0.0, 500.0], ch2=False)
+        self.assertFalse(self._chunks(written, "analog-1-2"))
+        self.assertTrue(self._chunks(written, "analog-1-1"))
+
+    def test_sidecar_describes_what_was_written(self):
+        written = self._export([0.0, 500.0])
+        sidecar = json.loads(next(e["text"] for e in written
+                                  if e["name"] == "dso2512g-recording.json"))
+        total_bytes = sum(self._chunks(written, "analog-1-1").values())
+        self.assertEqual(sidecar["sample_count"], total_bytes // 4)
+        self.assertEqual(sidecar["frame_count"], 2)
 
 
 if __name__ == "__main__":

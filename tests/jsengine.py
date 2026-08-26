@@ -98,3 +98,30 @@ def recording_source(emit_trigger_channel=False):
         "const verticalScale = 1, verticalOffsetCH1 = 0.005, verticalOffsetCH2 = 0.008;\n"
     )
     return stubs + src
+
+
+# Enough of JSZip and the DOM for exportRecordingSegment() to run to completion and record
+# what it wrote. Only the entry names and sizes matter here; real zipping is JSZip's problem.
+ZIP_STUB = """
+var __written = [];
+function JSZip() {}
+JSZip.prototype.file = function (name, data) {
+    var size = 0;
+    if (data == null) size = 0;
+    else if (typeof data === 'string') size = data.length;
+    else if (data.byteLength !== undefined) size = data.byteLength;
+    else if (data.length !== undefined) size = data.length;
+    __written.push({name: name, size: size, text: (typeof data === 'string') ? data : null});
+};
+JSZip.prototype.generateAsync = function () { return Promise.resolve({}); };
+var document = {
+    createElement: function () { return {click: function () {}}; },
+    body: {appendChild: function () {}, removeChild: function () {}}
+};
+var URL = {createObjectURL: function () { return 'blob:stub'; }, revokeObjectURL: function () {}};
+"""
+
+
+def recording_source_with_zip(emit_trigger_channel=False):
+    """recording_source() plus a JSZip/DOM stub, so the real export loop can be run."""
+    return ZIP_STUB + recording_source(emit_trigger_channel)
