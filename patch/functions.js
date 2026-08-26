@@ -14,7 +14,6 @@ function toggleRecording() {
         recPendingCH2 = null;
         recPendingSettings = null;
         recordSampleRate = appParam_sampleRate; // .sr carries a single samplerate; capture it now
-        recordCH2Enabled = (param_CH2enabled === 1); // fix the recorded channel set at start
         appParam_isRecording = true;
         btn.textContent = "SAVE";
         btn.classList.add('button-lit');
@@ -134,9 +133,13 @@ function exportRecordingSR() {
         log("ERROR: JSZip library not loaded; cannot build the .sr file.");
         return;
     }
+    // The channel set is decided here rather than at RECORD start: every frame is already
+    // buffered, so enabling CH2 part-way through a recording no longer loses it.
+    const recAnyCH2 = recordedFrames.some((f) => f.ch2 && f.ch2.length > 0);
+
     const zip = new JSZip();
     zip.file("version", "2");
-    zip.file("metadata", buildRecordingMetadata(recordSampleRate, recordCH2Enabled));
+    zip.file("metadata", buildRecordingMetadata(recordSampleRate, recAnyCH2));
 
     for (let i = 0; i < recordedFrames.length; i++) {
         const n = i + 1;
@@ -154,11 +157,14 @@ function exportRecordingSR() {
         // mid-recording V/div or vertical-position change does not corrupt everything after it.
         zip.file("analog-1-2-" + n, floatArrayToLEBytes(recToVolts(ch1, s.ch1.vpd, s.ch1.vpos)));
 
-        // CH2 analog samples, aligned to CH1 length (pad with 0 / truncate) so all channels share one timeline.
-        if (recordCH2Enabled) {
+        // CH2 analog samples, aligned to CH1's length so both channels span the same timeline
+        // (libsigrok streams channels sequentially, so only the totals have to match).
+        // Short or absent frames pad with NaN, never 0: after the volts fix a 0 is a real 0 V
+        // reading that PulseView's autoscale would honour, whereas NaN is skipped.
+        if (recAnyCH2) {
             const ch2src = recToVolts(frame.ch2 || [], s.ch2.vpd, s.ch2.vpos);
             const ch2 = new Array(len);
-            for (let j = 0; j < len; j++) ch2[j] = (j < ch2src.length) ? ch2src[j] : 0;
+            for (let j = 0; j < len; j++) ch2[j] = (j < ch2src.length) ? ch2src[j] : NaN;
             zip.file("analog-1-3-" + n, floatArrayToLEBytes(ch2));
         }
     }

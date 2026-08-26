@@ -9,4 +9,3 @@ let recPendingSettings = null; // acquisition settings in force for the frame be
 let recPendingTime = 0; // performance.now() when the current new frame was detected
 let recordedFrames = []; // array of captured frames: { ch1: number[], ch2: number[]|null, s: settings }
 let recordSampleRate = 1; // samplerate captured at RECORD start (Sa/s); .sr carries a single samplerate
-let recordCH2Enabled = false; // whether CH2 was enabled at RECORD start (fixes the recorded channel set)
