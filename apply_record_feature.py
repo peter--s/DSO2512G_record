@@ -42,10 +42,35 @@ def backup(path):
     print(f"  backup: {os.path.basename(path)} -> {os.path.basename(bak)}")
 
 
-def apply_js_ops(text, js_ops):
+def op_payload(op, doc_dir):
+    """Return an op's payload, from the inline "payload" key or from "payload_file".
+
+    Payloads are byte-exact insertions: they carry their own leading newlines and
+    must not gain or lose any. A payload file is therefore read verbatim (newline=""
+    disables CRLF translation) and exactly one trailing newline is stripped, which
+    lets the files be well-formed text files while staying byte-exact. A CR anywhere
+    is rejected rather than silently corrupting the output.
+    """
+    if ("payload" in op) == ("payload_file" in op):
+        raise SystemExit(f"ERROR: op '{op['name']}' needs exactly one of "
+                         f"'payload' / 'payload_file'. Aborting.")
+    if "payload" in op:
+        return op["payload"]
+    path = os.path.join(doc_dir, op["payload_file"])
+    if not os.path.exists(path):
+        raise SystemExit(f"ERROR: payload file not found: {path}. Aborting.")
+    with open(path, encoding="utf-8", newline="") as f:
+        text = f.read()
+    if "\r" in text:
+        raise SystemExit(f"ERROR: {op['payload_file']} contains CR; payload files "
+                         f"must be LF-only. Aborting.")
+    return text[:-1] if text.endswith("\n") else text
+
+
+def apply_js_ops(text, js_ops, doc_dir):
     """Insert each payload immediately after its (unique) anchor."""
     for op in js_ops:
-        anchor, payload = op["anchor"], op["payload"]
+        anchor, payload = op["anchor"], op_payload(op, doc_dir)
         n = text.count(anchor)
         if n != 1:
             raise SystemExit(f"ERROR: JS anchor for '{op['name']}' found {n} times (expected 1). Aborting.")
@@ -132,7 +157,7 @@ def process_single(doc_dir, patch, add_icon=True):
     if patch["js_marker"] in html or patch["record_marker"] in html:
         raise SystemExit("ERROR: app_clean.html already contains the RECORD feature. Aborting (nothing changed).")
     print("Building app_record.html (single, self-contained) from app_clean.html:")
-    html = apply_js_ops(html, patch["js_ops"])
+    html = apply_js_ops(html, patch["js_ops"], doc_dir)
     html = apply_record_button(html, patch)
     html = inline_jszip(html, doc_dir, patch)
     if add_icon:
@@ -155,7 +180,7 @@ def process_extracted(doc_dir, patch, add_icon=True):
         raise SystemExit("ERROR: extracted parts already contain the RECORD feature. Aborting (nothing changed).")
 
     print("Building app_record_extracted.js from app_clean_extracted.js:")
-    js = apply_js_ops(js, patch["js_ops"])
+    js = apply_js_ops(js, patch["js_ops"], doc_dir)
     write_output(out_js, js)
 
     print("Building app_record_extracted.html from app_clean_extracted.html:")
