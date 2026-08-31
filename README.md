@@ -76,17 +76,21 @@ they are what makes the export agree with the scope's own on‑screen readouts.
   They are laid back to back, which duplicates signal; the count is logged and recorded in
   the sidecar as `clamped_frames`. Measured intervals:
 
-  | time/div | frame span | interval |
-  |---|---|---|
-  | 10 ns – 500 ns | ≤ 6 µs | ~100 ms |
-  | 1 µs – 500 µs | ≤ 6 ms | ~200 ms |
-  | 1 ms – 5 ms | 12–60 ms | 200–300 ms |
-  | 10 ms | 120 ms | ~400 ms |
-  | 20 ms | 240 ms | ~500 ms |
-  | 50 ms | 600 ms | 800–1000 ms |
-  | 100 ms | 1200 ms | 1500–1600 ms |
-  | 200 ms – 5 s | 2.4–60 s | ~200 ms (rolling) |
-  | 10 s | 120 s | ~400 ms (rolling) |
+  | time/div | frame span | interval | acquired |
+  |---|---|---|---|
+  | 10 ns – 500 ns | ≤ 6 µs | ~100 ms | ~0% |
+  | 1 µs – 500 µs | ≤ 6 ms | ~200 ms | — |
+  | 1 ms | 12 ms | 200 ms | 7% |
+  | 5 ms | 60 ms | 200–300 ms | 28% |
+  | 10 ms | 120 ms | ~400 ms | — |
+  | 20 ms | 240 ms | ~500 ms | — |
+  | 50 ms | 600 ms | 725 ms | 84% |
+  | 100 ms | 1200 ms | 1400 ms | 88% |
+  | **200 ms – 5 s** | **2.4–60 s** | **~208 ms (rolling)** | **100%, overlapping** |
+  | 10 s | 120 s | ~400 ms (rolling) | overlapping |
+
+  Values without a measured "acquired" figure are read from the app's frame-interval
+  counter; the rest are computed from recorded captures.
 - **Very long or very fast recordings drop the gaps.** Gap filling is budgeted on
   uncompressed samples; beyond the budget the frames are concatenated, the sidecar reports
   `"mode": "concatenated"`, and the app says so on screen.

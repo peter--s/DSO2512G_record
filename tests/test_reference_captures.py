@@ -414,6 +414,326 @@ class TestDemoModeCapture(unittest.TestCase):
                            "demo waveform is flat - the override was not captured")
 
 
+# A ten-second recording — 46 frames, 45 intervals — used to pin the timeline's absolute
+# scale rather than just its local spacing. Same 100 Hz signal and 5 ms/div as capture 1a.
+LONG = "DSO2512G_recording_20260901T004715.sr"
+
+# The per-frame settings test. One recording in which CH2's vertical position was moved
+# twice and its V/div then halved, while CH1 was left alone as a control. Same 100 Hz
+# signal throughout, so every exported number should stay put across all four blocks.
+CHANGES = "DSO2512G_recording_20260901T004159.sr"
+
+
+class TestTimelineScale(unittest.TestCase):
+    """Does an exported second equal a real second?
+
+    The periodicity argument again, but over ten seconds instead of one and a half: the
+    generator free-runs while every frame triggers at the same point on the waveform, so
+    every frame-to-frame spacing must be a whole number of signal periods. Frame placement
+    comes from arrival timestamps, which know nothing about the signal, so agreement across
+    45 consecutive intervals bounds any cumulative scale error.
+
+    This is what a stopwatch check was meant to establish, and does it about a hundred
+    times more tightly — a hand-timed ten seconds is good to a couple of percent.
+    """
+
+    PERIOD_MS = 10.0    # 100 Hz, confirmed by autocorrelating the first frame
+
+    def setUp(self):
+        self.sr = SrFile(os.path.join(FIX, LONG))
+        self.sc = self.sr.sidecar()
+        self.period = self.sc["samplerate"] * self.PERIOD_MS / 1000.0   # samples
+
+    def _residuals_ms(self):
+        starts = [f["start_sample"] for f in self.sc["frames"]]
+        out = []
+        for a, b in zip(starts, starts[1:]):
+            delta = b - a
+            resid = delta - round(delta / self.period) * self.period
+            out.append(abs(resid) / self.sc["samplerate"] * 1000)
+        return out
+
+    def test_recording_really_is_about_ten_seconds(self):
+        seconds = self.sc["sample_count"] / self.sc["samplerate"]
+        self.assertAlmostEqual(seconds, 9.76, delta=0.05)
+        self.assertEqual(self.sc["timeline"]["mode"], "realtime")
+        self.assertEqual(self.sc["timeline"]["clamped_frames"], 0)
+
+    def test_every_interval_is_a_whole_number_of_periods(self):
+        resid = self._residuals_ms()
+        self.assertGreaterEqual(len(resid), 40, "need a long run for this to mean anything")
+        ambiguous = [r for r in resid if r >= self.PERIOD_MS / 4]
+        self.assertEqual(ambiguous, [],
+                         "%d of %d intervals are not near a whole number of periods"
+                         % (len(ambiguous), len(resid)))
+
+    def test_no_scale_error_accumulates(self):
+        span_s = (self.sc["frames"][-1]["t_ms"] - self.sc["frames"][0]["t_ms"]) / 1000.0
+        ppm = max(self._residuals_ms()) / 1000.0 / span_s * 1e6
+        self.assertLess(ppm, 1000, "timeline scale error %.0f ppm over %.1f s" % (ppm, span_s))
+
+    def test_most_of_the_recording_is_dead_time(self):
+        """28% acquisition, 72% gap — the honest picture the old export hid."""
+        acquired = sum(f["length"] for f in self.sc["frames"])
+        self.assertLess(acquired / self.sc["sample_count"], 0.5)
+
+
+class TestMidRecordingSettingChanges(unittest.TestCase):
+    """CH2's V/div and vertical position changed while recording; CH1 did not.
+
+    Freezing the settings at RECORD start was half of defect D, and it is invisible in
+    any capture where nothing is touched. Here the signal is constant while the front
+    panel moves underneath it, so the exported volts must not move — and CH1, left alone,
+    proves the signal itself was stable rather than conveniently compensating.
+    """
+
+    def setUp(self):
+        self.sr = SrFile(os.path.join(FIX, CHANGES))
+        self.sc = self.sr.sidecar()
+        self.blocks = []
+        for f in self.sc["frames"]:
+            key = (f["ch2"]["vpd"], round(f["ch2"]["vpos"] * 8, 2))
+            if not self.blocks or self.blocks[-1][0] != key:
+                self.blocks.append((key, []))
+            self.blocks[-1][1].append(f)
+
+    def _span(self, channel, frames):
+        samples = self.sr.samples(channel)
+        v = []
+        for f in frames:
+            v += finite(samples[f["start_sample"]:f["start_sample"] + f["length"]])
+        return max(v) - min(v), mean(v)
+
+    def test_the_capture_actually_contains_changes(self):
+        """Guards the test itself: without real changes everything below passes vacuously."""
+        vpds = {k[0] for k, _ in self.blocks}
+        vposs = {k[1] for k, _ in self.blocks}
+        self.assertEqual(vpds, {1.0, 2.0}, "expected a V/div change on CH2")
+        self.assertGreaterEqual(len(vposs), 3, "expected the position to move twice")
+        self.assertGreaterEqual(max(vposs) - min(vposs), 0.5, "position moves too small to see")
+
+    def test_volts_survive_a_vertical_position_move(self):
+        """The position moved 0.68 div at 2 V/div. If the ground reference were not
+        subtracted per frame, the exported level would jump by 0.68 x 2 = 1.36 V."""
+        at_same_vpd = [(k, fr) for k, fr in self.blocks if k[0] == 2.0]
+        means = [self._span("CH2", fr)[1] for _, fr in at_same_vpd]
+        observed = max(means) - min(means)
+        self.assertLess(observed, 0.5 * lsb(2.0),
+                        "CH2 level moved %.3f V with the position knob" % observed)
+        self.assertLess(observed, 1.36 / 10, "nowhere near the 1.36 V a dropped term would give")
+
+    def test_volts_survive_a_volts_per_div_change(self):
+        """2 V/div to 1 V/div. Reading V/div once at RECORD start would leave every
+        later frame a factor of two out."""
+        last_two = self.blocks[-2:]
+        (vpd_a, _), frames_a = last_two[0]
+        (vpd_b, _), frames_b = last_two[1]
+        self.assertEqual((vpd_a, vpd_b), (2.0, 1.0), "expected the V/div step here")
+        mean_a, mean_b = self._span("CH2", frames_a)[1], self._span("CH2", frames_b)[1]
+        self.assertAlmostEqual(mean_b, mean_a, delta=lsb(2.0),
+                               msg="CH2 mean moved %.3f V across the V/div change"
+                                   % abs(mean_b - mean_a))
+        self.assertGreater(abs(mean_b - mean_a * 2), 0.5,
+                           "result is suspiciously close to the doubled, unfixed value")
+
+    def test_peak_to_peak_is_stable_across_every_block(self):
+        ptps = [self._span("CH2", fr)[0] for _, fr in self.blocks]
+        self.assertLess(max(ptps) - min(ptps), 3 * lsb(2.0),
+                        "CH2 pk-pk spread %.3f V across settings blocks" % (max(ptps) - min(ptps)))
+
+    def test_the_untouched_channel_is_the_control(self):
+        """CH1 was left alone, so it shows the signal itself did not drift."""
+        ptps = [self._span("CH1", fr)[0] for _, fr in self.blocks]
+        means = [self._span("CH1", fr)[1] for _, fr in self.blocks]
+        self.assertLess(max(ptps) - min(ptps), lsb(0.5))
+        self.assertLess(max(means) - min(means), lsb(0.5))
+
+
+# A ten-second recording — 46 frames, 45 intervals — used to pin the timeline's absolute
+# scale rather than just its local spacing. Same 100 Hz signal and 5 ms/div as capture 1a.
+LONG = "DSO2512G_recording_20260901T004715.sr"
+
+# The per-frame settings test. CH2's vertical position was moved twice and its V/div then
+# halved, while CH1 was left alone as a control. Same signal throughout, 5 ms/div fixed.
+CHANGES = "DSO2512G_recording_20260901T004159.sr"
+
+# 200 ms/div, where the scope stops waiting for a full acquisition and rolls. Each frame
+# still shows 2.4 s of history but they arrive every ~208 ms, so they overlap and cannot
+# be placed apart. The one regime where the timeline genuinely cannot be reconstructed.
+ROLLING = "DSO2512G_recording_20260901T011033.sr"
+
+
+class TestTimelineScale(unittest.TestCase):
+    """Does an exported second equal a real second?
+
+    The periodicity argument again, but over ten seconds instead of one and a half: the
+    generator free-runs while every frame triggers at the same point on the waveform, so
+    every frame-to-frame spacing must be a whole number of signal periods. Frame placement
+    comes from arrival timestamps, which know nothing about the signal, so agreement across
+    45 consecutive intervals bounds any cumulative scale error.
+
+    This is what a stopwatch check was meant to establish, and does it about a hundred
+    times more tightly — a hand-timed ten seconds is good to a couple of percent.
+    """
+
+    PERIOD_MS = 10.0    # 100 Hz, confirmed by autocorrelating the first frame
+
+    def setUp(self):
+        self.sr = SrFile(os.path.join(FIX, LONG))
+        self.sc = self.sr.sidecar()
+        self.period = self.sc["samplerate"] * self.PERIOD_MS / 1000.0   # samples
+
+    def _residuals_ms(self):
+        starts = [f["start_sample"] for f in self.sc["frames"]]
+        out = []
+        for a, b in zip(starts, starts[1:]):
+            delta = b - a
+            resid = delta - round(delta / self.period) * self.period
+            out.append(abs(resid) / self.sc["samplerate"] * 1000)
+        return out
+
+    def test_recording_really_is_about_ten_seconds(self):
+        seconds = self.sc["sample_count"] / self.sc["samplerate"]
+        self.assertAlmostEqual(seconds, 9.76, delta=0.05)
+        self.assertEqual(self.sc["timeline"]["mode"], "realtime")
+        self.assertEqual(self.sc["timeline"]["clamped_frames"], 0)
+
+    def test_every_interval_is_a_whole_number_of_periods(self):
+        resid = self._residuals_ms()
+        self.assertGreaterEqual(len(resid), 40, "need a long run for this to mean anything")
+        ambiguous = [r for r in resid if r >= self.PERIOD_MS / 4]
+        self.assertEqual(ambiguous, [],
+                         "%d of %d intervals are not near a whole number of periods"
+                         % (len(ambiguous), len(resid)))
+
+    def test_no_scale_error_accumulates(self):
+        span_s = (self.sc["frames"][-1]["t_ms"] - self.sc["frames"][0]["t_ms"]) / 1000.0
+        ppm = max(self._residuals_ms()) / 1000.0 / span_s * 1e6
+        self.assertLess(ppm, 1000, "timeline scale error %.0f ppm over %.1f s" % (ppm, span_s))
+
+    def test_most_of_the_recording_is_dead_time(self):
+        """28% acquisition, 72% gap — the honest picture the old export hid."""
+        acquired = sum(f["length"] for f in self.sc["frames"])
+        self.assertLess(acquired / self.sc["sample_count"], 0.5)
+
+
+class TestMidRecordingSettingChanges(unittest.TestCase):
+    """CH2's V/div and vertical position changed while recording; CH1 did not.
+
+    Freezing the settings at RECORD start was half of defect D, and it is invisible in any
+    capture where nothing is touched. Here the signal is constant while the front panel
+    moves underneath it, so the exported volts must not move — and CH1, left alone, proves
+    the signal itself was stable rather than conveniently compensating.
+    """
+
+    def setUp(self):
+        self.sr = SrFile(os.path.join(FIX, CHANGES))
+        self.sc = self.sr.sidecar()
+        self.blocks = []
+        for f in self.sc["frames"]:
+            key = (f["ch2"]["vpd"], round(f["ch2"]["vpos"] * 8, 2))
+            if not self.blocks or self.blocks[-1][0] != key:
+                self.blocks.append((key, []))
+            self.blocks[-1][1].append(f)
+
+    def _span(self, channel, frames):
+        samples = self.sr.samples(channel)
+        v = []
+        for f in frames:
+            v += finite(samples[f["start_sample"]:f["start_sample"] + f["length"]])
+        return max(v) - min(v), mean(v)
+
+    def test_the_capture_actually_contains_changes(self):
+        """Guards the test itself: without real changes everything below passes vacuously."""
+        vpds = {k[0] for k, _ in self.blocks}
+        vposs = {k[1] for k, _ in self.blocks}
+        self.assertEqual(vpds, {1.0, 2.0}, "expected a V/div change on CH2")
+        self.assertGreaterEqual(len(vposs), 3, "expected the position to move twice")
+        self.assertGreaterEqual(max(vposs) - min(vposs), 0.5, "position moves too small to see")
+
+    def test_volts_survive_a_vertical_position_move(self):
+        """The position moved 0.68 div at 2 V/div. If the ground reference were not
+        subtracted per frame, the exported level would jump by 0.68 x 2 = 1.36 V."""
+        at_same_vpd = [(k, fr) for k, fr in self.blocks if k[0] == 2.0]
+        means = [self._span("CH2", fr)[1] for _, fr in at_same_vpd]
+        observed = max(means) - min(means)
+        self.assertLess(observed, 0.5 * lsb(2.0),
+                        "CH2 level moved %.3f V with the position knob" % observed)
+        self.assertLess(observed, 1.36 / 10, "nowhere near the 1.36 V a dropped term would give")
+
+    def test_volts_survive_a_volts_per_div_change(self):
+        """2 V/div to 1 V/div. Reading V/div once at RECORD start would leave every later
+        frame a factor of two out."""
+        (vpd_a, _), frames_a = self.blocks[-2]
+        (vpd_b, _), frames_b = self.blocks[-1]
+        self.assertEqual((vpd_a, vpd_b), (2.0, 1.0), "expected the V/div step here")
+        mean_a, mean_b = self._span("CH2", frames_a)[1], self._span("CH2", frames_b)[1]
+        self.assertAlmostEqual(mean_b, mean_a, delta=lsb(2.0),
+                               msg="CH2 mean moved %.3f V across the V/div change"
+                                   % abs(mean_b - mean_a))
+        self.assertGreater(abs(mean_b - mean_a * 2), 0.5,
+                           "result is suspiciously close to the doubled, unfixed value")
+
+    def test_peak_to_peak_is_stable_across_every_block(self):
+        ptps = [self._span("CH2", fr)[0] for _, fr in self.blocks]
+        self.assertLess(max(ptps) - min(ptps), 3 * lsb(2.0),
+                        "CH2 pk-pk spread %.3f V across settings blocks" % (max(ptps) - min(ptps)))
+
+    def test_the_untouched_channel_is_the_control(self):
+        """CH1 was left alone, so it shows the signal itself did not drift."""
+        ptps = [self._span("CH1", fr)[0] for _, fr in self.blocks]
+        means = [self._span("CH1", fr)[1] for _, fr in self.blocks]
+        self.assertLess(max(ptps) - min(ptps), lsb(0.5))
+        self.assertLess(max(means) - min(means), lsb(0.5))
+
+
+class TestRollingAcquisition(unittest.TestCase):
+    """200 ms/div, where the timeline genuinely cannot be reconstructed.
+
+    Below 200 ms/div a frame arrives every 12 x time/div plus transfer overhead, so there
+    is always dead time to show. Here the scope rolls: frames keep arriving every ~208 ms
+    while each still displays 2.4 s of history, so consecutive frames overlap in signal
+    content rather than being separate acquisitions.
+
+    The export cannot represent that, and the point of these assertions is that it does not
+    pretend to — it clamps, counts, and says so.
+    """
+
+    def setUp(self):
+        self.sr = SrFile(os.path.join(FIX, ROLLING))
+        self.sc = self.sr.sidecar()
+
+    def test_this_is_the_rolling_regime(self):
+        frames = self.sc["frames"]
+        tpd = {f["tpd"] for f in frames}
+        self.assertEqual(tpd, {0.2}, "expected 200 ms/div")
+        span_ms = 12 * 0.2 * 1000
+        intervals = [b["t_ms"] - a["t_ms"] for a, b in zip(frames, frames[1:])]
+        self.assertLess(max(intervals), span_ms,
+                        "frames must arrive faster than they span for this to be rolling")
+
+    def test_overlap_is_counted_and_reported(self):
+        self.assertGreater(self.sc["timeline"]["clamped_frames"], 0)
+        self.assertEqual(self.sc["timeline"]["clamped_frames"], self.sc["frame_count"] - 1,
+                         "at this timebase every interval should overlap")
+        self.assertTrue(any("overlap" in w.lower() for w in self.sc["warnings"]),
+                        "clamping must be reported, not silent")
+
+    def test_clamped_frames_are_laid_back_to_back(self):
+        """Clamping means no gaps at all, so the file is pure acquisition — which is also
+        why it duplicates signal: those frames really did overlap in time."""
+        self.assertEqual(sum(f["gap_before"] for f in self.sc["frames"]), 0)
+        self.assertEqual(sum(f["length"] for f in self.sc["frames"]), self.sc["sample_count"])
+        for name, _ in self.sr.analog_channels:
+            self.assertFalse([v for v in self.sr.samples(name) if math.isnan(v)],
+                             "%s should have no NaN when there are no gaps" % name)
+
+    def test_volts_are_still_correct_in_this_regime(self):
+        """The timeline is unreliable here; the voltages are not."""
+        ch1 = finite(self.sr.samples("CH1"))
+        self.assertAlmostEqual(max(ch1) - min(ch1), AWG_VPP, delta=2 * lsb(0.5))
+
+
 class TestReaderHandlesBothLayouts(unittest.TestCase):
     def test_reads_frame_marker_layout(self):
         """The fixtures predate the purely-analog layout: logic channel, CH1 at analog-1-2."""
