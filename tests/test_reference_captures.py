@@ -734,6 +734,107 @@ class TestRollingAcquisition(unittest.TestCase):
         self.assertAlmostEqual(max(ch1) - min(ch1), AWG_VPP, delta=2 * lsb(0.5))
 
 
+# CH2 switched off part-way through, at a fixed 1 ms/div. In single-channel mode the app
+# interleaves both ADCs into CH1, so the frame length and the samplerate both double - which
+# splits the recording even though the time/div never moved.
+CH2_ON = "DSO2512G_recording_20260901T012418_seg1.sr"    # CH2 on,  2401 samples, 200 kHz
+CH2_OFF = "DSO2512G_recording_20260901T012418_seg2.sr"   # CH2 off, 4801 samples, 400 kHz
+
+# A partial read in the rolling regime: 1626 of the 4801 samples a full frame would hold.
+ROLL_PARTIAL = "DSO2512G_recording_20260901T012418_seg13.sr"
+
+
+class TestSingleChannelExport(unittest.TestCase):
+    """The CH1-only path, and what toggling CH2 does to the samplerate.
+
+    Everything else recorded here has both channels on, so this is the only hardware
+    evidence for the single-channel metadata layout - and for the claim in the README that
+    the time/div is not the only thing that moves the samplerate.
+    """
+
+    def setUp(self):
+        self.on = SrFile(os.path.join(FIX, CH2_ON))
+        self.off = SrFile(os.path.join(FIX, CH2_OFF))
+
+    def test_single_channel_layout(self):
+        """One analog channel means CH1 is the only entry, and no CH2 files exist."""
+        self.assertEqual(self.off.total_analog, 1)
+        self.assertEqual(self.off.analog_channels, [("CH1", "analog-1-1")])
+        self.assertEqual([n for n in self.off.names if n.startswith("analog-1-2")], [])
+        self.assertIn("total analog=1", self.off.metadata_text)
+        self.assertNotIn("CH2", self.off.metadata_text)
+
+    def test_single_channel_file_still_has_samples(self):
+        samples = finite(self.off.samples("CH1"))
+        self.assertTrue(samples)
+        self.assertAlmostEqual(max(samples) - min(samples), AWG_VPP, delta=2 * lsb(0.5))
+
+    def test_disabling_ch2_doubles_the_frame_length(self):
+        """Confirms by measurement what the source only implied.
+
+        convertToWaveArray() interleaves CH1 and CH2 into one array when CH2 is off, so a
+        single-channel frame holds twice the samples over the same 12 divisions. Both
+        segments are at the same 1 ms/div, so the time/div cannot account for it.
+        """
+        on, off = self.on.sidecar(), self.off.sidecar()
+        self.assertEqual({f["tpd"] for f in on["frames"]},
+                         {f["tpd"] for f in off["frames"]},
+                         "the two segments must share a time/div for this to mean anything")
+        len_on = on["frames"][0]["length"]
+        len_off = off["frames"][0]["length"]
+        self.assertEqual(len_off, 2 * len_on - 1, "expected the interleaved double length")
+        self.assertAlmostEqual(off["samplerate"], 2 * on["samplerate"], delta=1)
+
+    def test_the_channel_change_split_the_recording(self):
+        """A rate change forces separate files, and this one had nothing to do with the
+        time/div - which is why the warning no longer blames it."""
+        on, off = self.on.sidecar(), self.off.sidecar()
+        self.assertEqual(on["segment"]["index"], 1)
+        self.assertEqual(off["segment"]["index"], 2)
+        self.assertEqual(on["segment"]["count"], off["segment"]["count"])
+        self.assertNotEqual(on["samplerate"], off["samplerate"])
+
+
+class TestRollingPartialFrame(unittest.TestCase):
+    """In roll mode a frame can be read before the acquisition has filled.
+
+    At 200 ms/div a screen spans 12 x 0.2 = 2.4 s, so a complete frame cannot exist until
+    2.4 s have passed. Reading earlier returns whatever has accumulated, and the app derives
+    the samplerate from the frame length - so a partial read reports a rate that describes
+    how full the buffer was, not how fast it was sampled.
+
+    Nothing here is wrong with the export; the point of pinning it is that the recorded
+    samplerate is not trustworthy in this regime, and the file says enough to tell.
+    """
+
+    def setUp(self):
+        self.sr = SrFile(os.path.join(FIX, ROLL_PARTIAL))
+        self.sc = self.sr.sidecar()
+
+    def test_it_is_a_partial_read_at_a_slow_timebase(self):
+        f = self.sc["frames"][0]
+        self.assertEqual(f["tpd"], 0.2)
+        self.assertLess(f["length"], 4801 / 2, "expected a partially filled buffer")
+
+    def test_reported_samplerate_reflects_the_fill_not_the_rate(self):
+        """A full frame at 200 ms/div would be about 2 kHz; this reports far less."""
+        self.assertLess(self.sc["samplerate"], 1000)
+        self.assertGreater(self.sc["samplerate"], 0)
+
+    def test_the_file_is_still_internally_consistent(self):
+        """Whatever the rate means, the export must still describe itself correctly."""
+        self.assertEqual(self.sc["sample_count"],
+                         sum(f["length"] + f["gap_before"] for f in self.sc["frames"]))
+        self.assertEqual(self.sc["samplerate"], self.sr.samplerate)
+        for name, _ in self.sr.analog_channels:
+            self.assertEqual(len(self.sr.samples(name)), self.sc["sample_count"])
+
+    def test_voltages_are_unaffected(self):
+        """The time axis is unreliable here; the volts are not."""
+        samples = finite(self.sr.samples("CH1"))
+        self.assertAlmostEqual(max(samples) - min(samples), AWG_VPP, delta=2 * lsb(0.5))
+
+
 class TestReaderHandlesBothLayouts(unittest.TestCase):
     def test_reads_frame_marker_layout(self):
         """The fixtures predate the purely-analog layout: logic channel, CH1 at analog-1-2."""
