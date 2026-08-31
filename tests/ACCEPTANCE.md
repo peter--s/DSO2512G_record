@@ -81,31 +81,29 @@ generator's 2.5 V, within one ADC code; CH1 mean 0.5989 V against the scope's ow
 
 A **square** makes the 0 V baseline and the 2.5 V top easiest to read by eye in PulseView.
 
-## Test 2 — vertical position changed mid-recording ⬜ *not done*
+## Tests 2 and 3 — settings changed mid-recording ✅ *done*
 
-The sharpest remaining test of per-frame settings, and one the fixed-amplitude generator
-makes easy: nothing about the signal changes, only where it sits on screen.
+Fixture `…20260901T004159.sr`, assertions in `TestMidRecordingSettingChanges`. One
+recording in which CH2's position was moved twice and its V/div then halved, with CH1 left
+alone as a control. Same 100 Hz signal throughout and 5 ms/div fixed, so the file does not
+split and only the front panel moves.
 
-Square, ~1 kHz, channels as in Test 1a. Start recording, then **move CH1's vertical position
-by 2–3 divisions** part-way through, and again near the end. Keep the time/div fixed.
+| frames | CH2 V/div | CH2 position | CH2 pk-pk | CH2 mean | CH1 pk-pk | CH1 mean |
+|---|---|---|---|---|---|---|
+| 0–10 | 2.00 V | +0.04 div | 2.720 | 1.726 | 2.500 | 1.829 |
+| 11–12 | 2.00 V | +0.12 div | 2.560 | 1.720 | 2.500 | 1.830 |
+| 13–31 | 2.00 V | **+0.72 div** | 2.640 | 1.741 | 2.500 | 1.829 |
+| 32–52 | **1.00 V** | +0.72 div | 2.560 | 1.795 | 2.500 | 1.829 |
 
-**Expect:** exported CH1 unchanged throughout — the trace jumps on screen, the volts do not,
-and its low level stays at 0.000 V in every frame. `ch1.vpos` differs between early and late
-frames in the sidecar while CH1's exported mean and pk-pk stay put.
+**Result.** The 0.68-division move would shift CH2 by **1.36 V** if the ground reference
+were not subtracted per frame; the observed shift is **0.015 V**. The 2 V → 1 V change would
+leave every later frame **a factor of two out** if V/div were read once at RECORD start; the
+observed difference is **0.054 V**, under one ADC code. CH1's untouched settings confirm the
+signal itself was stable rather than conveniently compensating.
 
-**Before the fix** the volts would follow the knob, since position was never subtracted.
-
-## Test 3 — V/div changed mid-recording ⬜ *not done*
-
-Set up as Test 1a. Start recording, then change **CH1 from 500 mV/div to 2.00 V/div**
-part-way through. Both fit on screen: 2.5 V spans 5 divisions at 500 mV/div, 1.25 at 2 V/div.
-Keep the time/div fixed, so this does not split the file.
-
-**Expect:** exported CH1 pk-pk stays 2.5 V across the change and still matches CH2;
-`ch1.vpd` changes between frames in the sidecar.
-
-**Before the fix** every frame after the change was wrong by 4×, since V/div was read once
-at RECORD start.
+Together with Test 4 this closes defect D from both directions: a rate change there, and
+V/div and position at a fixed rate here. Either channel works; CH2 is simply the one that
+happened to be adjusted.
 
 ## Test 4 — samplerate changed mid-recording ✅ *done*
 
@@ -144,36 +142,40 @@ far better than the ±one-acquisition-interval the README claims as its limit.
 > at or below ~200 Hz** — 100 Hz worked well. It cannot work at 1.99 MHz as in capture 1b,
 > where a 502 ns period is swamped by millisecond jitter.
 
-⬜ **Still to do:** record for a **stopwatch-timed 10 s** at 5 ms/div and confirm PulseView's
-total duration matches. That pins the absolute scale of the timeline rather than its spacing.
+**Absolute scale, done too.** Fixture `…20260901T004715.sr` is a 9.758 s recording, and all
+**45 of its 45** intervals land within a quarter period — bounding cumulative timeline scale
+error to **under 217 ppm** over ten seconds. A stopwatch would have settled this to a couple
+of percent, so the periodicity check supersedes it by about a hundredfold. Asserted in
+`TestTimelineScale`.
 
-## Test 6 — frame interval and the rolling-acquisition limit ⬜ *partly done*
+## Test 6 — frame interval and the rolling-acquisition limit ✅ *done*
 
-Frames arrive every `12 × time/div` plus 100–350 ms of transfer overhead, so **below
-200 ms/div there is always dead time** and `clamped_frames` should stay 0. Measured from the
-app's bottom-right counter:
+Fixture `…20260901T011033.sr`, assertions in `TestRollingAcquisition`. Frames arrive every
+`12 × time/div` plus 100–350 ms of transfer overhead, so below 200 ms/div there is always
+dead time. Measured from recorded captures:
 
-| time/div | frame span | interval |
-|---|---|---|
-| 10 ns – 500 ns | ≤ 6 µs | ~100 ms (capture 1b: 100.0 ms) |
-| 1 µs – 500 µs | ≤ 6 ms | ~200 ms |
-| 1 ms – 5 ms | 12–60 ms | 200–300 ms (capture 1a: 200.6 ms) |
-| 10 ms | 120 ms | ~400 ms |
-| 20 ms | 240 ms | ~500 ms |
-| 50 ms | 600 ms | 800–1000 ms |
-| 100 ms | 1200 ms | 1500–1600 ms |
-| 200 ms – 5 s | 2.4–60 s | ~200 ms (rolling) |
-| 10 s | 120 s | ~400 ms (rolling) |
+| time/div | frame span | interval | acquired | clamped |
+|---|---|---|---|---|
+| 200 ns | 2.4 µs | 100 ms | ~0% | 0 |
+| 1 ms | 12 ms | 200 ms | 7% | 0 |
+| 5 ms | 60 ms | 200–300 ms | 28% | 0 |
+| 50 ms | 600 ms | 725 ms | 84% | 0 |
+| 100 ms | 1200 ms | 1400 ms | 88% | 0 |
+| **200 ms** | **2400 ms** | **208 ms** | **100%** | **12 of 12** |
 
-At **200 ms/div and slower** the scope rolls: it streams a continuously updating buffer
-instead of waiting for a full acquisition, so frames keep arriving every ~200 ms while each
-still shows 2.4 s or more of history.
+The crossover sits between 100 and 200 ms/div, exactly where the arithmetic predicts: at
+100 ms/div the interval still exceeds the frame span by 200 ms, and at 200 ms/div it falls
+an order of magnitude short.
 
-⬜ **To do:** record at 200 ms/div and confirm `clamped_frames` > 0 with a note in the log.
+At 200 ms/div the scope rolls — it streams a continuously updating buffer instead of waiting
+for a full acquisition — so frames keep arriving every ~208 ms while each still shows 2.4 s
+of history. **Every** interval overlapped, all 12 were clamped, and the export contains no
+gaps at all.
 
 **This is a real limitation, not a display artefact.** In that regime consecutive frames are
 re-reads of one rolling acquisition, so they overlap in signal content and the export
-duplicates data. Worth knowing before trusting a slow-timebase recording.
+duplicates data. The voltages remain correct; only the time axis is untrustworthy. Worth
+knowing before relying on a slow-timebase recording.
 
 ## Test 7 — size guard ✅ *done*
 
@@ -206,10 +208,12 @@ renders and RECORD works, the payloads parsed.
 
 | | |
 |---|---|
-| **Test 2** | vertical position moved mid-recording, time/div fixed |
-| **Test 3** | V/div changed mid-recording, time/div fixed |
-| **Test 5** | stopwatch-timed 10 s at 5 ms/div, to pin absolute duration |
-| **Test 6** | one recording at 200 ms/div, to see `clamped_frames` > 0 |
+| **Single-channel export** | every capture so far has CH2 enabled, so the CH1-only path (`total analog=1`, no `analog-1-2-*` entries) has never been produced by hardware |
 
-Tests 2 and 3 are the substantive ones — they are the only checks of per-frame settings
-that the samplerate-split path does not already cover.
+One recording with **CH2 switched off** would close it. It would also settle a claim
+currently inferred from the source rather than measured: disabling CH2 should *double* the
+acquired frame length, because in single-channel mode the app interleaves both ADCs into
+CH1. If so, the samplerate doubles and toggling CH2 mid-recording splits the file — the same
+mechanism demo mode demonstrated in Test 4, from the opposite direction.
+
+Everything else in this document is covered by a committed fixture with automatic assertions.
