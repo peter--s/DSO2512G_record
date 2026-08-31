@@ -204,16 +204,51 @@ renders and RECORD works, the payloads parsed.
 
 ---
 
+## Test 9 — single-channel export ✅ *done*
+
+Fixtures `…20260901T012418_seg1.sr` and `_seg2.sr`, assertions in
+`TestSingleChannelExport`. CH2 was switched off part-way through a recording at a fixed
+1 ms/div, which split the file:
+
+| | seg1 | seg2 |
+|---|---|---|
+| CH2 | on | **off** |
+| `total analog` | 2 | **1** |
+| entries | `analog-1-1`, `analog-1-2` | `analog-1-1` only |
+| frame length | 2401 | **4801** |
+| samplerate | 200 kHz | **400 kHz** |
+
+Two results. The CH1-only metadata layout is now produced by hardware rather than only by
+a unit test. And the README's claim that the channel mode moves the samplerate is confirmed
+by measurement rather than inferred from the source: single-channel mode interleaves both
+ADCs into CH1, so the frame length and the rate both double with the time/div untouched.
+
+## Test 10 — partial frames in roll mode ✅ *done*
+
+Fixture `…20260901T012418_seg13.sr`, assertions in `TestRollingPartialFrame`.
+
+The same recording ended with five single-frame segments at 200 ms/div holding 42, 426,
+842, 1146 and 1626 samples, reporting 17, 177, 350, 477 and 677 Hz. A screen at 200 ms/div
+spans 2.4 s, so a complete frame cannot exist until 2.4 s have elapsed; reading earlier
+returns whatever has accumulated. Since the app derives the samplerate from the frame
+length, a partial read reports the **fill level rather than the sampling rate** — 42 samples
+is 0.9% of a full frame, hence 17 Hz.
+
+Nothing in the export is wrong here, and the files remain internally consistent, but two
+things follow that are worth knowing:
+
+- the recorded samplerate is not trustworthy at 200 ms/div and slower;
+- because every differing length is a differing rate, such a recording fragments into many
+  single-frame files.
+
+The voltages are unaffected in this regime — only the time axis is.
+
 ## Remaining
 
-| | |
-|---|---|
-| **Single-channel export** | every capture so far has CH2 enabled, so the CH1-only path (`total analog=1`, no `analog-1-2-*` entries) has never been produced by hardware |
+Nothing. Every test in this document is covered by a committed fixture with automatic
+assertions, across 13 hardware captures spanning 200 ns/div to 200 ms/div, both timeline
+modes, both channel counts, demo and live acquisition, and splits of 2, 6 and 13 segments.
 
-One recording with **CH2 switched off** would close it. It would also settle a claim
-currently inferred from the source rather than measured: disabling CH2 should *double* the
-acquired frame length, because in single-channel mode the app interleaves both ADCs into
-CH1. If so, the samplerate doubles and toggling CH2 mid-recording splits the file — the same
-mechanism demo mode demonstrated in Test 4, from the opposite direction.
-
-Everything else in this document is covered by a committed fixture with automatic assertions.
+The one thing no capture can establish is long-term stability, so the checks worth repeating
+after any change to the recording code are Test 8 (demo mode, needs no scope) and Test 1
+(one signal, two channels, different scales and positions).

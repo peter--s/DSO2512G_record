@@ -91,6 +91,13 @@ they are what makes the export agree with the scope's own on‑screen readouts.
 
   Values without a measured "acquired" figure are read from the app's frame-interval
   counter; the rest are computed from recorded captures.
+
+  In the rolling regime the **reported samplerate is also unreliable**. A screen at
+  200 ms/div spans 2.4 s, so a complete frame cannot exist until 2.4 s have passed, and a
+  read before then returns whatever has accumulated. The rate is derived from the frame
+  length, so a partial read describes how full the buffer was rather than how fast it was
+  sampled — a 42-sample read reports 17 Hz. Since each differing length is a differing
+  samplerate, such a recording also fragments into many single-frame files.
 - **Very long or very fast recordings drop the gaps.** Gap filling is budgeted on
   uncompressed samples; beyond the budget the frames are concatenated, the sidecar reports
   `"mode": "concatenated"`, and the app says so on screen.
@@ -98,8 +105,10 @@ they are what makes the export agree with the scope's own on‑screen readouts.
   into one `…_seg<k>.sr` per run — `srzip` cannot store segments and one file cannot
   describe two rates correctly. The rate is derived from the acquired frame length
   (`(length − 1) / 12 / time-per-div`), so the **time/div is not the only thing that moves
-  it**: enabling CH2 halves the frame length, and demo mode substitutes a generated array of
-  its own size. Both split a recording with the time/div untouched. Returning to an earlier
+  it**: switching CH2 off doubles the frame length, because single-channel mode interleaves
+  both ADCs into CH1 (measured: 2401 samples at 200 kHz becomes 4801 at 400 kHz, at a fixed
+  1 ms/div), and demo mode substitutes a generated array of its own size. Both split a
+  recording with the time/div untouched. Returning to an earlier
   rate starts a further segment rather than rejoining the first, since the frames in between
   belong elsewhere on the timeline.
 - **Bit‑identical frames are deduplicated.** New frames are detected by comparing the raw
