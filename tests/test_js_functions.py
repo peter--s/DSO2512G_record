@@ -285,6 +285,116 @@ class TestSamplerateSplitting(unittest.TestCase):
         rates = [20000, 20000, 40000, 20000, 80000, 80000]
         self.assertEqual(sum(r["n"] for r in self._split(rates)), len(rates))
 
+    def _export_n_segments(self, n, tpd=0.5):
+        """Drive the real exportRecordingSR() with n differing samplerates."""
+        harness = recording_source_with_zip() + (
+            "\nvar logged = [];\n"
+            "log = function (m) { logged.push(m); };\n"
+            "var shown = [];\n"
+            "showMessage = function (m) { shown.push(m); };\n"
+            "var downloads = [];\n"
+            "downloadRecordingBlob = function (blob, name) { downloads.push(name); };\n"
+            "recordedFrames = [];\n"
+            "for (var i = 0; i < %d; i++) {\n"
+            "  recordedFrames.push({ch1: new Array(4).fill(0.25), ch2: null,\n"
+            "    s: {t: i * 200, sr: 100 + i * 37, tpd: %s, len: 4, trigIdx: 2,\n"
+            "        src: 'DataBuffer2', demo: false, acq: 'Sample',\n"
+            "        ch1: {vpd: 0.5, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "        ch2: {on: false, vpd: 1, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "        trig: {src: 'CH1', mode: 'Auto', edge: 'rising', level: 1}}});\n"
+            "}\n"
+            "recordSampleRate = 100;\n"
+            "exportRecordingSR().then(function () {\n"
+            "  __emit(JSON.stringify({log: logged, shown: shown, downloads: downloads,\n"
+            "                         written: __written.map(function (e) { return e.name; })}));\n"
+            "});\n" % (n, tpd)
+        )
+        return run_js_json(harness)
+
+    def test_a_large_split_becomes_one_archive(self):
+        """Thirty segments must not become thirty downloads.
+
+        A browser stops starting downloads well before thirty and does not report that it
+        did: a real thirty-way split delivered ten files and lost twenty silently. One
+        archive is one download, so nothing can go missing.
+        """
+        r = self._export_n_segments(30)
+        self.assertEqual(len(r["downloads"]), 1,
+                         "expected a single archive, got %d downloads" % len(r["downloads"]))
+        self.assertTrue(r["downloads"][0].endswith("_segments.zip"))
+        self.assertIn("bundling", " ".join(r["log"]).lower())
+
+    def test_the_archive_contains_every_segment(self):
+        """The point of bundling is that none are dropped, so count them."""
+        r = self._export_n_segments(30)
+        members = [n for n in r["written"] if n.endswith(".sr")]
+        self.assertEqual(len(members), 30, "archive holds %d of 30 segments" % len(members))
+        self.assertEqual(len(set(members)), 30, "segment filenames must be unique")
+        for i in (1, 15, 30):
+            self.assertTrue(any(("_seg%d.sr" % i) in n for n in members),
+                            "segment %d missing from the archive" % i)
+
+    def test_a_small_split_still_downloads_separately(self):
+        """Below the threshold the .sr files arrive directly, as before — bundling would
+        make the common two- or three-way split needlessly awkward to open."""
+        r = self._export_n_segments(3)
+        self.assertEqual(len(r["downloads"]), 3)
+        self.assertTrue(all(n.endswith(".sr") for n in r["downloads"]))
+        self.assertNotIn("bundling", " ".join(r["log"]).lower())
+
+    def test_many_single_frame_segments_are_called_out(self):
+        """A recording that fragments into many one-frame files is the slow-timebase
+        pathology, not someone turning the knob. The scope rolls, each read returns a
+        partially filled buffer, and every differing length reads back as a differing
+        samplerate — so ten downloads appear with implausible rates on them. Detect the
+        shape and explain it rather than handing that over silently.
+        """
+        frames = [{"ch1": [0], "s": {"sr": r}} for r in (50, 79, 98, 130, 159, 180)]
+        harness = recording_source_with_zip() + (
+            "\nvar logged = [];\n"
+            "log = function (m) { logged.push(m); };\n"
+            "var shown = [];\n"
+            "showMessage = function (m) { shown.push(m); };\n"
+            "recordedFrames = %s.map(function (f) {\n"
+            "  f.ch1 = new Array(4).fill(0.25); f.ch2 = null;\n"
+            "  f.s = {t: 0, sr: f.s.sr, tpd: 0.5, len: 4, trigIdx: 2, src: 'DataBuffer2',\n"
+            "         demo: false, acq: 'Sample',\n"
+            "         ch1: {vpd: 0.5, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "         ch2: {on: false, vpd: 1, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "         trig: {src: 'CH1', mode: 'Auto', edge: 'rising', level: 1}};\n"
+            "  return f; });\n"
+            "recordSampleRate = 50;\n"
+            "exportRecordingSR();\n"
+            "__emit(JSON.stringify({log: logged, shown: shown}));\n" % json.dumps(frames)
+        )
+        r = run_js_json(harness)
+        joined = " ".join(r["log"]).lower()
+        self.assertIn("single frame", joined)
+        self.assertIn("still filling", joined)
+        self.assertTrue(any("buffer fill" in m.lower() for m in r["shown"]),
+                        "the user should be told on screen, not only in the log")
+
+    def test_a_normal_split_is_not_flagged_as_the_slow_timebase_case(self):
+        """Six healthy multi-frame segments must not trigger the roll-mode note."""
+        harness = recording_source_with_zip() + (
+            "\nvar logged = [];\n"
+            "log = function (m) { logged.push(m); };\n"
+            "showMessage = function () {};\n"
+            "var mk = function (sr) { return {ch1: new Array(4).fill(0.25), ch2: null,\n"
+            "  s: {t: 0, sr: sr, tpd: 0.005, len: 4, trigIdx: 2, src: 'DataBuffer2',\n"
+            "      demo: false, acq: 'Sample',\n"
+            "      ch1: {vpd: 0.5, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "      ch2: {on: false, vpd: 1, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "      trig: {src: 'CH1', mode: 'Auto', edge: 'rising', level: 1}}}; };\n"
+            "recordedFrames = [mk(40000), mk(40000), mk(20000), mk(20000), mk(10000), mk(10000)];\n"
+            "recordSampleRate = 40000;\n"
+            "exportRecordingSR();\n"
+            "__emit(JSON.stringify(logged));\n"
+        )
+        joined = " ".join(run_js_json(harness)).lower()
+        self.assertIn("samplerate changed", joined)
+        self.assertNotIn("single frame", joined)
+
     def test_split_warning_does_not_blame_the_timebase(self):
         """The samplerate is derived from the acquired frame length, so the time/div is
         only one of the things that moves it. Enabling CH2 halves the length, and demo

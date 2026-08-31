@@ -835,6 +835,63 @@ class TestRollingPartialFrame(unittest.TestCase):
         self.assertAlmostEqual(max(samples) - min(samples), AWG_VPP, delta=2 * lsb(0.5))
 
 
+# 500 ms/div: consecutive partial reads of one filling buffer, each a different length and
+# so a different apparent samplerate. The export split thirty ways — and the browser
+# delivered only the first ten, silently, which is what prompted the .zip bundling.
+ROLL_FRAGMENTS = ["DSO2512G_recording_20260901T012911_seg%d.sr" % n for n in (1, 5, 10)]
+
+
+class TestRollModeFragmentation(unittest.TestCase):
+    """The worst case for the timeline, and the reason the export now says so.
+
+    A screen at 500 ms/div spans 6 s, so a complete frame cannot exist until 6 s have
+    elapsed. Reads arrive every ~200 ms regardless, each returning whatever has accumulated
+    so far, and since the samplerate is derived from the frame length each read reports a
+    different — and wrong — rate. Splitting on rate then produces one file per read.
+
+    The true rate is recoverable from the growth: a full frame is 4801 samples over 6 s, so
+    800 Hz, and a 200 ms read should add about 160 samples. It does.
+    """
+
+    def setUp(self):
+        self.segs = [SrFile(os.path.join(FIX, n)) for n in ROLL_FRAGMENTS]
+        self.scs = [s.sidecar() for s in self.segs]
+
+    def test_each_file_holds_a_single_partial_frame(self):
+        for sc in self.scs:
+            self.assertEqual(sc["frame_count"], 1)
+            f = sc["frames"][0]
+            self.assertEqual(f["tpd"], 0.5)
+            self.assertLess(f["length"], 4801 / 2, "expected a partially filled buffer")
+
+    def test_they_are_slices_of_one_fragmented_recording(self):
+        counts = {sc["segment"]["count"] for sc in self.scs}
+        self.assertEqual(counts, {30}, "these came from one thirty-way split")
+        idx = [sc["segment"]["index"] for sc in self.scs]
+        self.assertEqual(idx, sorted(idx))
+
+    def test_the_buffer_grows_between_reads(self):
+        lengths = [sc["frames"][0]["length"] for sc in self.scs]
+        self.assertEqual(lengths, sorted(lengths), "the buffer should only fill")
+        self.assertLess(lengths[0], lengths[-1] / 2, "expected substantial growth")
+
+    def test_reported_rates_track_the_fill_not_the_sampling(self):
+        """Rates rise with buffer fill, which is the tell. A real rate change would not
+        march upward in step with the frame length."""
+        rates = [sc["samplerate"] for sc in self.scs]
+        lengths = [sc["frames"][0]["length"] for sc in self.scs]
+        self.assertEqual(rates, sorted(rates))
+        for rate, length in zip(rates, lengths):
+            self.assertAlmostEqual(rate, (length - 1) / 12 / 0.5, delta=1)
+        self.assertLess(max(rates), 800, "every reported rate is below the true ~800 Hz")
+
+    def test_voltages_are_unaffected(self):
+        """Only the time axis is compromised in this regime."""
+        for sr in self.segs:
+            samples = finite(sr.samples("CH1"))
+            self.assertAlmostEqual(max(samples) - min(samples), AWG_VPP, delta=2 * lsb(0.5))
+
+
 class TestReaderHandlesBothLayouts(unittest.TestCase):
     def test_reads_frame_marker_layout(self):
         """The fixtures predate the purely-analog layout: logic channel, CH1 at analog-1-2."""

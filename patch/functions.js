@@ -295,7 +295,7 @@ function splitRecordingBySamplerate(frames) {
 // filled with NaN, so the gaps are the frame boundaries and no marker channel is needed. Chunks
 // must be numbered contiguously from 1 per channel: the reader walks base-1, base-2, ... and
 // stops at the first one missing, so a hole would silently truncate the capture.
-function exportRecordingSegment(frames, sampleRate, segIndex, segCount, stamp) {
+function buildRecordingSegment(frames, sampleRate, segIndex, segCount, stamp) {
     // The channel set is decided here rather than at RECORD start: every frame is already
     // buffered, so enabling CH2 part-way through a recording no longer loses it.
     const recAnyCH2 = frames.some((f) => f.ch2 && f.ch2.length > 0);
@@ -373,20 +373,65 @@ function exportRecordingSegment(frames, sampleRate, segIndex, segCount, stamp) {
 
     const filename = "DSO2512G_recording_" + stamp +
         (segCount > 1 ? "_seg" + segIndex : "") + ".sr";
-    return zip.generateAsync({ type: "blob", compression: "DEFLATE" }).then((blob) => {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-        log("Saved " + frames.length + " frame(s), " + timeline.total + " samples/channel (" +
-            timeline.mode + ") to " + filename);
+    return { zip: zip, filename: filename, frames: frames.length, timeline: timeline };
+}
+
+// Hands one blob to the browser as a download.
+function downloadRecordingBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+// Builds one segment and downloads it on its own.
+function exportRecordingSegment(frames, sampleRate, segIndex, segCount, stamp) {
+    const built = buildRecordingSegment(frames, sampleRate, segIndex, segCount, stamp);
+    return built.zip.generateAsync({ type: "blob", compression: "DEFLATE" }).then((blob) => {
+        downloadRecordingBlob(blob, built.filename);
+        log("Saved " + built.frames + " frame(s), " + built.timeline.total +
+            " samples/channel (" + built.timeline.mode + ") to " + built.filename);
     }).catch((err) => {
-        log("ERROR building " + filename + ": " + err.message);
+        log("ERROR building " + built.filename + ": " + err.message);
     });
+}
+
+// Builds every segment and delivers them as one .zip.
+//
+// Browsers cap how many downloads a single user gesture may start, and they do it by
+// silently dropping the rest: a recording that split thirty ways delivered ten files and
+// said nothing. One archive is one download, so nothing can go missing. The .sr files
+// inside still open in PulseView once extracted.
+function exportRecordingBundle(segments, stamp) {
+    const outer = new JSZip();
+    const filename = "DSO2512G_recording_" + stamp + "_segments.zip";
+    let chain = Promise.resolve();
+    let total = 0;
+    segments.forEach((seg, i) => {
+        chain = chain.then(() => {
+            const built = buildRecordingSegment(seg.frames, seg.sampleRate, i + 1,
+                                                segments.length, stamp);
+            total += built.frames;
+            // Already-deflated members; storing them again would only cost time.
+            return built.zip.generateAsync({ type: "uint8array", compression: "DEFLATE" })
+                .then((bytes) => { outer.file(built.filename, bytes); });
+        });
+    });
+    return chain
+        .then(() => outer.generateAsync({ type: "blob", compression: "STORE" }))
+        .then((blob) => {
+            downloadRecordingBlob(blob, filename);
+            log("Saved " + segments.length + " segments (" + total + " frame(s)) to " +
+                filename + ". Extract it to get the .sr files.");
+            showMessage("Saved " + segments.length + " segments in one .zip", "ALL");
+        })
+        .catch((err) => {
+            log("ERROR building " + filename + ": " + err.message);
+        });
 }
 
 // Exports the recording, as one .sr or as one per samplerate run.
@@ -402,6 +447,26 @@ function exportRecordingSR() {
             " files, one per samplerate (a .sr carries only one). The rate is derived from the " +
             "acquired frame length, so the time/div, the channel mode and demo mode all move it.");
         showMessage("Samplerate changed - saving " + segments.length + " files", "ALL");
+    }
+    // A recording that fragments into many one-frame files is almost always a slow timebase
+    // rather than someone turning the knob repeatedly. At 200 ms/div and slower the scope
+    // rolls, and a screen cannot be complete until 12 x time/div has elapsed, so each read
+    // returns a partially filled buffer. Every differing length reads back as a differing
+    // samplerate, so each becomes its own segment. Say so, because ten downloads with
+    // implausible rates on them is otherwise a baffling thing to be handed.
+    if (segments.length > 4 && segments.every((s) => s.frames.length === 1)) {
+        log("NOTE: every one of these " + segments.length + " files holds a single frame. At a " +
+            "slow time/div the acquisition is read while it is still filling, so the frame length " +
+            "grows with each read and the reported samplerate describes how full the buffer was, " +
+            "not how fast it was sampled. Record at a faster time/div for a usable timeline.");
+        showMessage("Slow time/div - samplerates describe buffer fill, not sampling rate", "ALL");
+    }
+    // Past a handful, deliver one archive instead of many downloads. A browser will stop
+    // starting downloads well before thirty and will not say that it did.
+    if (segments.length > recordMaxSeparateDownloads) {
+        log("That is more files than a browser will reliably download; bundling them into " +
+            "one .zip instead so none are dropped.");
+        return exportRecordingBundle(segments, stamp);
     }
     // Sequential rather than concurrent: browsers throttle bursts of programmatic downloads.
     let chain = Promise.resolve();

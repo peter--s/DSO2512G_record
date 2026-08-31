@@ -98,6 +98,11 @@ they are what makes the export agree with the scope's own on‑screen readouts.
   length, so a partial read describes how full the buffer was rather than how fast it was
   sampled — a 42-sample read reports 17 Hz. Since each differing length is a differing
   samplerate, such a recording also fragments into many single-frame files.
+
+  **Beyond 8 segments the export delivers one `.zip` instead of many downloads.** Browsers
+  cap how many files a single user gesture may save and drop the rest without saying so — a
+  thirty-way split was observed delivering ten files and losing twenty silently. The `.sr`
+  files inside open normally once extracted.
 - **Very long or very fast recordings drop the gaps.** Gap filling is budgeted on
   uncompressed samples; beyond the budget the frames are concatenated, the sidecar reports
   `"mode": "concatenated"`, and the app says so on screen.
