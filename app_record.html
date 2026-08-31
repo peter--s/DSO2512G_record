@@ -7936,8 +7936,9 @@ function exportRecordingSegment(frames, sampleRate, segIndex, segCount, stamp) {
             "which at slow timebases exceeds the interval between acquisitions.");
     }
     if (segCount > 1) {
-        warnings.push("The time/div changed mid-recording; this is segment " + segIndex + " of " +
-            segCount + ", each written at its own samplerate.");
+        warnings.push("The samplerate changed mid-recording; this is segment " + segIndex + " of " +
+            segCount + ", each written at its own samplerate. The rate follows the acquired frame " +
+            "length as well as the time/div, so enabling CH2 or demo mode changes it too.");
     }
     zip.file("dso2512g-recording.json",
         JSON.stringify(buildRecordingSidecar(timeline, recAnyCH2, warnings, segIndex, segCount, sampleRate), null, 2));
@@ -7969,9 +7970,10 @@ function exportRecordingSR() {
     const segments = splitRecordingBySamplerate(recordedFrames);
     const stamp = recordingTimestamp();
     if (segments.length > 1) {
-        log("The time/div changed during the recording; writing " + segments.length +
-            " files, one per samplerate (a .sr carries only one).");
-        showMessage("Time/div changed - saving " + segments.length + " files", "ALL");
+        log("The samplerate changed during the recording; writing " + segments.length +
+            " files, one per samplerate (a .sr carries only one). The rate is derived from the " +
+            "acquired frame length, so the time/div, the channel mode and demo mode all move it.");
+        showMessage("Samplerate changed - saving " + segments.length + " files", "ALL");
     }
     // Sequential rather than concurrent: browsers throttle bursts of programmatic downloads.
     let chain = Promise.resolve();

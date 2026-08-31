@@ -135,6 +135,285 @@ class TestVoltsConversion(unittest.TestCase):
                            "offset-free conversion should be grossly wrong, got %.2f V" % no_offset)
 
 
+# The first capture produced by the fixed exporter, and the acceptance measurement itself.
+#
+# The scope's built-in generator (sinc, 100.00 Hz, fixed 2.5 Vpp — it has no offset control
+# and no DC output) was fed to *both* inputs, with the channels deliberately set four scales
+# apart and to different vertical positions. One signal, two very different front-panel
+# configurations: a correct export has to produce the same volts from both.
+#
+# Front panel, from the matching screenshot (2026-08-31 23:31):
+#   AUTO, 5.00 ms/div, 40.00 kSa/s, trigger CH1 rising at 1.20 V
+#   CH1  500 mV/div  10x  DC   ground marker 2.26 div below centre
+#   CH2  2.00 V/div  10x  DC   ground marker on the centre line
+#   CH1 Freq:100.00Hz PKPK:2.48V Mean:599.28mV
+#   CH2 Freq:100.00Hz PKPK:2.56V Mean:513.07mV
+SINC = "DSO2512G_recording_20260831T230631.sr"
+
+SINC_FREQ_HZ = 100.0      # the generator's setting, confirmed by both channels' readouts
+AWG_VPP = 2.5             # fixed by the instrument; the manual gives no way to change it
+
+
+def lsb(volts_per_div):
+    """One ADC code in volts: the screen is 8 divisions of 25 codes each."""
+    return volts_per_div / 25.0
+
+
+class TestAcceptanceCapture(unittest.TestCase):
+    """One signal through two differently-configured channels.
+
+    This is the check no offline test can make: that the app reads the *right* settings
+    off the instrument. The arithmetic could be perfect and still produce nonsense if
+    appParam_currVPD_CH1 were not really CH1's V/div.
+    """
+
+    def setUp(self):
+        self.sr = SrFile(os.path.join(FIX, SINC))
+        self.sc = self.sr.sidecar()
+        self.ch1 = finite(self.sr.samples("CH1"))
+        self.ch2 = finite(self.sr.samples("CH2"))
+
+    def test_front_panel_settings_were_captured(self):
+        """The sidecar must agree with what the front panel actually showed."""
+        f = self.sc["frames"][0]
+        self.assertEqual(f["ch1"]["vpd"], 0.5)
+        self.assertEqual(f["ch2"]["vpd"], 2.0)
+        # Ground markers measured off the screenshot: -2.26 div and -0.01 div.
+        self.assertAlmostEqual(f["ch1"]["vpos"] * 8, -2.26, delta=0.1)
+        self.assertAlmostEqual(f["ch2"]["vpos"] * 8, 0.0, delta=0.1)
+        self.assertEqual((f["ch1"]["probe"], f["ch2"]["probe"]), ("10x", "10x"))
+        self.assertEqual(f["trigger"]["source"], "CH1")
+        self.assertEqual(f["trigger"]["edge"], "rising")
+        self.assertAlmostEqual(f["trigger"]["level_v"], 1.20, delta=lsb(0.5))
+
+    def test_both_channels_report_the_same_signal(self):
+        """Four times apart in V/div, 2.26 divisions apart on screen, same volts out.
+
+        The tolerance is the combined quantisation of the two channels, not a fudge
+        factor: CH2 at 2 V/div resolves the signal in 80 mV steps, so agreement closer
+        than that is not physically available.
+        """
+        pairs = [(a, b) for a, b in zip(self.sr.samples("CH1"), self.sr.samples("CH2"))
+                 if not (math.isnan(a) or math.isnan(b))]
+        self.assertTrue(pairs)
+        floor = math.sqrt(lsb(0.5) ** 2 + lsb(2.0) ** 2)
+        rms = math.sqrt(sum((a - b) ** 2 for a, b in pairs) / len(pairs))
+        self.assertLess(rms, 1.5 * floor,
+                        "channels disagree by %.3f V rms, quantisation floor is %.3f V"
+                        % (rms, floor))
+
+    def test_amplitude_matches_the_generator(self):
+        """Absolute check against the instrument's fixed 2.5 Vpp output.
+
+        Relative agreement between channels would survive a wrong global scale factor;
+        this would not.
+        """
+        ptp = max(self.ch1) - min(self.ch1)
+        self.assertAlmostEqual(ptp, AWG_VPP, delta=lsb(0.5),
+                               msg="CH1 pk-pk %.3f V != %.1f V from the generator" % (ptp, AWG_VPP))
+
+    def test_matches_the_scopes_own_readouts(self):
+        for name, samples, vpd, expected in (("CH1", self.ch1, 0.5, 0.59928),
+                                             ("CH2", self.ch2, 2.0, 0.51307)):
+            got = mean(samples)
+            self.assertAlmostEqual(got, expected, delta=lsb(vpd),
+                                   msg="%s mean %.4f V != %.4f V" % (name, got, expected))
+
+    def test_frame_spacing_is_a_whole_number_of_signal_periods(self):
+        """Independent confirmation that the wall-clock timeline is real.
+
+        The generator free-runs and every frame triggers at the same point on the
+        waveform, so however far apart two frames truly are, it must be a whole number
+        of signal periods. Frame placement here comes from arrival timestamps, which
+        know nothing about the signal — so if the two agree, the placement is sound.
+        """
+        period = self.sc["samplerate"] / SINC_FREQ_HZ    # samples per period
+        starts = [f["start_sample"] for f in self.sc["frames"]]
+        worst_ms = 0.0
+        for a, b in zip(starts, starts[1:]):
+            delta = b - a
+            residual = delta - round(delta / period) * period
+            worst_ms = max(worst_ms, abs(residual) / self.sc["samplerate"] * 1000)
+        # A quarter period of slack: beyond that the nearest-period rounding is ambiguous.
+        self.assertLess(worst_ms, 1000 / SINC_FREQ_HZ / 4,
+                        "frame spacing is %.2f ms away from a whole number of periods" % worst_ms)
+
+    def test_gaps_are_real_dead_time_not_padding(self):
+        """Most of this file is dead time, which is the point: 8 frames of 60 ms
+        acquisition spread across 1.56 s of wall clock."""
+        acquired = sum(f["length"] for f in self.sc["frames"])
+        self.assertLess(acquired, self.sc["sample_count"] / 2)
+        self.assertEqual(self.sc["timeline"]["mode"], "realtime")
+        self.assertEqual(self.sc["timeline"]["clamped_frames"], 0)
+
+
+# The second acceptance capture, in a completely different regime: 200 ns/div at
+# 100 MSa/s instead of 5 ms/div at 40 kSa/s. Square wave near the generator's 2 MHz
+# ceiling, so the acquisition is 2.4 us long while frames still arrive every 100 ms -
+# 99.998% dead time, which is what makes the size guard fire.
+#
+# Front panel, from the matching screenshot (2026-09-01 00:28):
+#   AUTO, 200 ns/div, 100.00 MSa/s, trigger CH1 rising at 1.38 V, "97 ms" frame interval
+#   CH1  500 mV/div  10x  DC   ground marker 2.58 div below centre
+#   CH2  1.00 V/div  10x  DC   ground marker 1.13 div below centre
+#   CH1 Freq:1.99MHz Duty:72.9% PKPK:2.44V Mean:1.75V
+#   CH2 Freq:1.99MHz Duty:73.3% PKPK:2.48V Mean:1.69V
+SQUARE = "DSO2512G_recording_20260901T002729.sr"
+
+
+class TestFastTimebaseCapture(unittest.TestCase):
+    """Square wave at 1.99 MHz, both channels off-centre, two scales apart.
+
+    A square is the clearest test of the ground reference: the generator's output is
+    unipolar, so the low level is a known 0 V that must land on zero regardless of where
+    the channel sits on screen. It has no offset control and no DC output, so this is the
+    only absolute voltage reference the instrument can produce.
+    """
+
+    def setUp(self):
+        self.sr = SrFile(os.path.join(FIX, SQUARE))
+        self.sc = self.sr.sidecar()
+
+    def test_front_panel_settings_were_captured(self):
+        f = self.sc["frames"][0]
+        self.assertEqual((f["ch1"]["vpd"], f["ch2"]["vpd"]), (0.5, 1.0))
+        # Ground markers measured off the screenshot: -2.58 div and -1.13 div.
+        self.assertAlmostEqual(f["ch1"]["vpos"] * 8, -2.58, delta=0.1)
+        self.assertAlmostEqual(f["ch2"]["vpos"] * 8, -1.13, delta=0.1)
+        self.assertAlmostEqual(f["trigger"]["level_v"], 1.38, delta=lsb(0.5))
+        self.assertEqual(self.sr.samplerate, 100000000)
+
+    def test_unipolar_baseline_lands_on_zero(self):
+        """The square's low level is the generator's 0 V, on a channel positioned
+        2.58 divisions below centre. Without the vertical-position term it would sit
+        at -2.58 x 8 x 0.5 = -10.3 V instead."""
+        low = min(finite(self.sr.samples("CH1")))
+        self.assertAlmostEqual(low, 0.0, delta=lsb(0.5),
+                               msg="CH1 low level is %.3f V, not ground" % low)
+
+    def test_amplitude_matches_the_generator(self):
+        ch1 = finite(self.sr.samples("CH1"))
+        ptp = max(ch1) - min(ch1)
+        self.assertAlmostEqual(ptp, AWG_VPP, delta=2 * lsb(0.5),
+                               msg="CH1 pk-pk %.3f V != %.1f V" % (ptp, AWG_VPP))
+
+    def test_matches_the_scopes_own_readouts(self):
+        for name, vpd, expected in (("CH1", 0.5, 1.75), ("CH2", 1.0, 1.69)):
+            got = mean(finite(self.sr.samples(name)))
+            self.assertAlmostEqual(got, expected, delta=2 * lsb(vpd),
+                                   msg="%s mean %.3f V != %.2f V" % (name, got, expected))
+
+    def test_size_guard_engaged(self):
+        """16 frames spanning 1.5 s at 100 MSa/s would be 150M samples per channel.
+
+        That is ~1.2 GB materialised in the browser and again in PulseView, for 4800
+        samples of actual signal. Dropping the gaps is the only way this file opens.
+        """
+        self.assertEqual(self.sc["timeline"]["mode"], "concatenated")
+        self.assertTrue(self.sc["warnings"], "concatenating must be reported, not silent")
+        span_s = (self.sc["frames"][-1]["t_ms"] - self.sc["frames"][0]["t_ms"]) / 1000.0
+        would_need = span_s * self.sc["samplerate"]
+        self.assertGreater(would_need, self.sc["timeline"]["max_samples"])
+        self.assertEqual(self.sc["sample_count"],
+                         sum(f["length"] for f in self.sc["frames"]),
+                         "concatenated mode must leave no gaps at all")
+
+    def test_no_nan_when_gaps_are_dropped(self):
+        """Concatenated mode has no dead time to mark, so nothing should be NaN."""
+        for name, _ in self.sr.analog_channels:
+            self.assertFalse([v for v in self.sr.samples(name) if math.isnan(v)],
+                             "%s has NaN despite concatenated mode" % name)
+
+    def test_megasample_rate_survives_the_metadata_round_trip(self):
+        self.assertEqual(self.sc["samplerate_string"], "100 MHz")
+        self.assertEqual(self.sc["samplerate"], self.sr.samplerate)
+
+
+# One recording carried through six time/div settings, exported as six files.
+# The rates go 40k -> 20k -> 10k -> 20k -> 40k -> 100k, so two of them are revisited:
+# proof on hardware that runs are consecutive rather than grouped by rate.
+SPLIT = ["DSO2512G_recording_20260901T004410_seg%d.sr" % n for n in range(1, 7)]
+
+# A recording made entirely in demo mode, with the scope connected but not driving the
+# capture. Before the demo-mode fix the recorder snapshotted the hardware buffer instead
+# of the generated waveform, so this file could not have contained a signal at all.
+DEMO = "DSO2512G_recording_20260901T004940.sr"
+
+
+class TestSegmentSplit(unittest.TestCase):
+    """A .sr carries one samplerate, so a rate change has to become separate files."""
+
+    def setUp(self):
+        self.segs = [SrFile(os.path.join(FIX, n)) for n in SPLIT]
+        self.scs = [s.sidecar() for s in self.segs]
+
+    def test_segments_are_numbered_and_complete(self):
+        self.assertEqual([sc["segment"]["index"] for sc in self.scs], [1, 2, 3, 4, 5, 6])
+        self.assertTrue(all(sc["segment"]["count"] == 6 for sc in self.scs))
+
+    def test_each_segment_carries_one_rate_matching_its_timebase(self):
+        """samplerate = (frame length - 1) / 12 divisions / seconds-per-division.
+
+        If a segment held two rates, one of them would be misdescribed - which is the
+        whole reason for splitting.
+        """
+        for sr, sc in zip(self.segs, self.scs):
+            tpds = {f["tpd"] for f in sc["frames"]}
+            lengths = {f["length"] for f in sc["frames"]}
+            self.assertEqual(len(tpds), 1, "segment holds more than one timebase")
+            self.assertEqual(len(lengths), 1)
+            expected = (lengths.pop() - 1) / 12 / tpds.pop()
+            self.assertAlmostEqual(sc["samplerate_exact"], expected, delta=1)
+            self.assertEqual(sr.samplerate, sc["samplerate"])
+
+    def test_a_revisited_rate_starts_a_new_segment(self):
+        """40k, 20k and 40k again must be three files, not two.
+
+        Grouping by rate would merge frames that are far apart on the timeline and
+        recreate exactly the problem splitting exists to avoid.
+        """
+        rates = [sc["samplerate"] for sc in self.scs]
+        self.assertEqual(rates, [40000, 20000, 10000, 20000, 40000, 100000])
+        self.assertGreater(len(rates), len(set(rates)), "expected a revisited rate here")
+        for a, b in zip(rates, rates[1:]):
+            self.assertNotEqual(a, b, "adjacent segments must differ in rate")
+
+    def test_every_segment_says_it_is_one_of_several(self):
+        """A split file must carry the reason it exists, so it is not mistaken for a
+        complete recording. The exact wording is pinned in test_js_functions.py; these
+        fixtures predate the current phrasing, so only the substance is checked here."""
+        for sc in self.scs:
+            self.assertTrue(sc["warnings"], "a split segment must record why it was split")
+            self.assertTrue(any("segment" in w.lower() for w in sc["warnings"]))
+
+    def test_volts_are_unaffected_by_the_rate_changes(self):
+        """The signal never changed, only how fast it was sampled."""
+        for sr, sc in zip(self.segs, self.scs):
+            ch1 = finite(sr.samples("CH1"))
+            ptp = max(ch1) - min(ch1)
+            self.assertAlmostEqual(ptp, AWG_VPP, delta=2 * lsb(0.5),
+                                   msg="segment %d pk-pk %.3f V" % (sc["segment"]["index"], ptp))
+
+
+class TestDemoModeCapture(unittest.TestCase):
+    """Recorded with demo mode on, which the recorder used to miss entirely."""
+
+    def setUp(self):
+        self.sr = SrFile(os.path.join(FIX, DEMO))
+        self.sc = self.sr.sidecar()
+
+    def test_frames_are_marked_as_generated(self):
+        self.assertTrue(all(f["demo"] for f in self.sc["frames"]))
+
+    def test_generated_waveform_actually_reached_the_file(self):
+        """The regression this guards: the snapshot used to be taken before the
+        demo-mode override, so these frames held the stale hardware buffer instead."""
+        ch1 = finite(self.sr.samples("CH1"))
+        self.assertTrue(ch1)
+        self.assertGreater(max(ch1) - min(ch1), 1.0,
+                           "demo waveform is flat - the override was not captured")
+
+
 class TestReaderHandlesBothLayouts(unittest.TestCase):
     def test_reads_frame_marker_layout(self):
         """The fixtures predate the purely-analog layout: logic channel, CH1 at analog-1-2."""

@@ -285,6 +285,32 @@ class TestSamplerateSplitting(unittest.TestCase):
         rates = [20000, 20000, 40000, 20000, 80000, 80000]
         self.assertEqual(sum(r["n"] for r in self._split(rates)), len(rates))
 
+    def test_split_warning_does_not_blame_the_timebase(self):
+        """The samplerate is derived from the acquired frame length, so the time/div is
+        only one of the things that moves it. Enabling CH2 halves the length, and demo
+        mode substitutes a generated array of its own size - both split a recording with
+        the time/div untouched, which is how this wording was found to be wrong.
+        """
+        harness = recording_source_with_zip() + (
+            "\nrecordSampleRate = 40000;\n"
+            "var frames = [{ch1: new Array(4).fill(0.25), ch2: null,\n"
+            "  s: {t: 0, sr: 20000, tpd: 0.005, len: 4, trigIdx: 2, src: 'DataBuffer2',\n"
+            "      demo: true, acq: 'Sample',\n"
+            "      ch1: {vpd: 0.5, vpos: -0.28, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "      ch2: {on: false, vpd: 1, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "      trig: {src: 'CH1', mode: 'Auto', edge: 'rising', level: 1.18}}}];\n"
+            "exportRecordingSegment(frames, 20000, 2, 2, 'STAMP');\n"
+            "var sc = JSON.parse(__written.filter(function (e) {"
+            "  return e.name === 'dso2512g-recording.json'; })[0].text);\n"
+            "__emit(JSON.stringify(sc.warnings));\n"
+        )
+        warnings = run_js_json(harness)
+        self.assertTrue(warnings)
+        text = " ".join(warnings).lower()
+        self.assertIn("samplerate changed", text)
+        self.assertIn("segment 2 of 2", text)
+        self.assertNotIn("the time/div changed", text)
+
 
 @unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
 class TestNaNGapEncoding(unittest.TestCase):
