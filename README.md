@@ -67,15 +67,37 @@ they are what makes the export agree with the scope's own on‑screen readouts.
 - **Frame placement is accurate to about one acquisition interval.** The timestamp is when
   the frame was *received*, not when it was triggered. The export reconstructs *when* frames
   happened; it is not a continuous record of the signal.
-- **At slow timebases the gaps disappear.** A frame spans 12 × time/div of signal but
-  arrives every few hundred ms, so from roughly 50 ms/div upward frames overlap in
-  wall‑clock time and are laid back to back. The count is logged and recorded in the sidecar.
+- **At 200 ms/div and slower, frames overlap and the timeline collapses.** Up to 100 ms/div
+  a frame arrives every `12 × time/div` plus a fixed transfer overhead of roughly
+  100–350 ms, so there is always dead time to show. From 200 ms/div the scope rolls —
+  it streams a continuously updating buffer instead of waiting for a full acquisition — so
+  frames keep arriving every ~200 ms while each still shows 12 × time/div of *history*.
+  Consecutive frames then overlap in signal content rather than being separate acquisitions.
+  They are laid back to back, which duplicates signal; the count is logged and recorded in
+  the sidecar as `clamped_frames`. Measured intervals:
+
+  | time/div | frame span | interval |
+  |---|---|---|
+  | 10 ns – 500 ns | ≤ 6 µs | ~100 ms |
+  | 1 µs – 500 µs | ≤ 6 ms | ~200 ms |
+  | 1 ms – 5 ms | 12–60 ms | 200–300 ms |
+  | 10 ms | 120 ms | ~400 ms |
+  | 20 ms | 240 ms | ~500 ms |
+  | 50 ms | 600 ms | 800–1000 ms |
+  | 100 ms | 1200 ms | 1500–1600 ms |
+  | 200 ms – 5 s | 2.4–60 s | ~200 ms (rolling) |
+  | 10 s | 120 s | ~400 ms (rolling) |
 - **Very long or very fast recordings drop the gaps.** Gap filling is budgeted on
   uncompressed samples; beyond the budget the frames are concatenated, the sidecar reports
   `"mode": "concatenated"`, and the app says so on screen.
-- **`.sr` carries a single samplerate.** Changing the time/div mid‑recording splits the
-  export into one `…_seg<k>.sr` per samplerate run, because `srzip` has no way to store
-  segments and one file cannot describe both rates correctly.
+- **`.sr` carries a single samplerate**, so a rate change mid‑recording splits the export
+  into one `…_seg<k>.sr` per run — `srzip` cannot store segments and one file cannot
+  describe two rates correctly. The rate is derived from the acquired frame length
+  (`(length − 1) / 12 / time-per-div`), so the **time/div is not the only thing that moves
+  it**: enabling CH2 halves the frame length, and demo mode substitutes a generated array of
+  its own size. Both split a recording with the time/div untouched. Returning to an earlier
+  rate starts a further segment rather than rejoining the first, since the frames in between
+  belong elsewhere on the timeline.
 - **Bit‑identical frames are deduplicated.** New frames are detected by comparing the raw
   buffer, so a perfectly static signal with no noise can look like a gap that should not be
   there.
