@@ -18,8 +18,12 @@ y=636, 117 px/division, 8 divisions = 936 px over the full scale).
 """
 import math
 import os
+import re
+import shutil
 import sys
+import tempfile
 import unittest
+import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # sibling imports under -m and discover
 
@@ -890,6 +894,82 @@ class TestRollModeFragmentation(unittest.TestCase):
         for sr in self.segs:
             samples = finite(sr.samples("CH1"))
             self.assertAlmostEqual(max(samples) - min(samples), AWG_VPP, delta=2 * lsb(0.5))
+
+
+# The bundling fix, exercised on hardware. A 500 ms/div recording that split 31 ways and
+# arrived as one archive with all 31 inside — where the same situation a few minutes earlier
+# had split 30 ways and delivered 10 files, losing twenty without a word.
+BUNDLE = "DSO2512G_recording_20260901T014856_segments.zip"
+
+
+class TestBundledSegments(unittest.TestCase):
+    """One download instead of many, and nothing missing.
+
+    This is the regression guard for silent data loss: browsers cap how many files a single
+    gesture may save, so a large split has to arrive as one archive or it arrives incomplete.
+    """
+
+    def setUp(self):
+        self.zip = zipfile.ZipFile(os.path.join(FIX, BUNDLE))
+        self.members = sorted(self.zip.namelist(),
+                              key=lambda n: int(re.search(r"_seg(\d+)\.sr$", n).group(1)))
+        self.tmp = tempfile.mkdtemp(prefix="bundle-")
+        self.segs = []
+        for n in self.members:
+            path = os.path.join(self.tmp, os.path.basename(n))
+            with open(path, "wb") as f:
+                f.write(self.zip.read(n))
+            self.segs.append(SrFile(path))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_every_declared_segment_is_present(self):
+        """The failure this replaces declared 30 segments and shipped 10."""
+        declared = {s.sidecar()["segment"]["count"] for s in self.segs}
+        self.assertEqual(len(declared), 1, "segments disagree about how many there are")
+        self.assertEqual(len(self.segs), declared.pop(), "the archive is missing segments")
+
+    def test_segment_numbering_is_contiguous(self):
+        idx = [s.sidecar()["segment"]["index"] for s in self.segs]
+        self.assertEqual(idx, list(range(1, len(idx) + 1)))
+
+    def test_every_member_is_a_readable_sr(self):
+        for s in self.segs:
+            self.assertEqual(s.version, "2")
+            self.assertGreater(s.samplerate, 0)
+            self.assertTrue(s.analog_channels)
+            name = s.analog_channels[0][0]
+            self.assertTrue(finite(s.samples(name)), "%s has no usable samples" % name)
+
+    def test_voltages_are_identical_across_every_segment(self):
+        """31 segments, reported rates from 31 Hz to 800 Hz, one unchanging signal.
+
+        The samplerate is meaningless in this regime, but the volts must not care: the
+        conversion depends on V/div and vertical position, not on timing.
+        """
+        ptps = []
+        for s in self.segs:
+            ch1 = finite(s.samples("CH1"))
+            ptps.append(max(ch1) - min(ch1))
+        self.assertLess(max(ptps) - min(ptps), lsb(0.5),
+                        "pk-pk varies by %.3f V across segments" % (max(ptps) - min(ptps)))
+        self.assertAlmostEqual(mean(ptps), AWG_VPP, delta=2 * lsb(0.5))
+
+    def test_the_buffer_fills_to_a_complete_frame(self):
+        """The whole ramp is here: a partial first read growing to a full screen.
+
+        The last segment is the one that settles the true rate. A full frame at 500 ms/div
+        is 4801 samples over 12 x 0.5 = 6 s, so 800 Hz — and once the buffer is full that
+        is exactly what it reports, while every partial read before it under-reports.
+        """
+        lengths = [s.sidecar()["frames"][0]["length"] for s in self.segs]
+        rates = [s.sidecar()["samplerate"] for s in self.segs]
+        self.assertEqual(lengths, sorted(lengths), "the buffer should only ever fill")
+        self.assertEqual(rates, sorted(rates), "reported rate should track the fill")
+        self.assertEqual(lengths[-1], 4801, "expected the last read to be a complete frame")
+        self.assertEqual(rates[-1], 800, "a full frame at 500 ms/div is 800 Hz")
+        self.assertLess(rates[0], 100, "the first read should badly under-report")
 
 
 class TestReaderHandlesBothLayouts(unittest.TestCase):
