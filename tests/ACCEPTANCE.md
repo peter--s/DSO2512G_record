@@ -243,6 +243,37 @@ things follow that are worth knowing:
 
 The voltages are unaffected in this regime — only the time axis is.
 
+## Test 11 — the download cap ✅ *done*
+
+Fixture `…20260901T014856_segments.zip`, assertions in `TestBundledSegments`.
+
+Roll-mode fragmentation exposed a defect the splitting itself introduced. A 500 ms/div
+recording split **thirty** ways, and only segments 1–10 reached the disk: the browser stopped
+starting downloads and reported nothing. The sidecars still said "segment 1 of 30", so the
+loss was visible only by counting files. Before this PR you would have got one misdescribed
+file; after it, two thirds of a recording vanished silently.
+
+Fixed by delivering a single `.zip` once a split exceeds `recordMaxSeparateDownloads` (8).
+One download cannot be truncated. Smaller splits still arrive as loose `.sr` files, so the
+common two- or three-way case is unchanged.
+
+**Confirmed on hardware.** The same situation minutes later split **31 ways and all 31
+arrived**, contiguous and individually readable. That archive also captures the complete
+buffer-fill ramp, and its last segment settles the true rate:
+
+| seg | length | reported rate | frames |
+|---|---|---|---|
+| 1 | 186 | 31 Hz | 1 |
+| 30 | 4794 | 799 Hz | 1 |
+| **31** | **4801 (full)** | **800 Hz** | **3** |
+
+A full frame at 500 ms/div is 4801 samples over 6 s, so 800 Hz — exactly what the buffer
+reports once complete, while every partial read before it under-reports in proportion to its
+fill. CH1 pk-pk is **2.480 V in all 31 segments**: the reported samplerate is meaningless in
+this regime and the voltages do not care, because the conversion depends on V/div and
+vertical position, not on timing.
+
+
 ## Remaining
 
 Nothing. Every test in this document is covered by a committed fixture with automatic
