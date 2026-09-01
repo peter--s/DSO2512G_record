@@ -826,10 +826,11 @@ let recPendingTime = 0; // performance.now() when the current new frame was dete
 let recordedFrames = []; // array of captured frames: { ch1: number[], ch2: number[]|null, s: settings }
 let recordSampleRate = 1; // samplerate captured at RECORD start (Sa/s); .sr carries a single samplerate
 const recordEmitTriggerChannel = false; // true -> also emit a TRIG logic channel (shifts CH1/CH2 to analog-1-2/3)
-const recordMaxTimelineSamples = 20000000; // per channel; above this, gaps are dropped and frames concatenated
+const recordMaxTimelineSamples = 50000000; // per channel; above this each frame becomes its own file (see README)
 const recordGapChunkSamples = 1048576; // gap runs are split into chunks of this many samples (libsigrok's CHUNKSIZE)
+let recNanChunk = null; // one shared all-NaN chunk, reused for every full-size gap
 const recordMaxSeparateDownloads = 8; // beyond this many segments, deliver one .zip instead (browsers drop excess downloads silently)
-const recordCollapsePartialReads = true; // drop partial re-reads of a still-filling acquisition, keeping the fullest of each run
+const recordStitchRollingFrames = true; // reassemble a rolling acquisition read repeatedly into one continuous stream
 const recordMessageSeconds = 5; // how long the recorder's own on-screen messages stay up
 let appParam_messageFrames = 0; // one-shot override for the next message's countdown (0 = the app's own default)
 let recDroppedFrames = 0; // frames discarded because they held no usable samples
@@ -7647,6 +7648,20 @@ function recShowMessage(text) {
     showMessage(text, "ALL");
 }
 
+// Samples per second for one frame, using the app's own rule.
+//
+// The app never derives time from appParam_sampleRate. Everywhere it turns a sample index
+// into a time - filterLowPass(), the measurements, the cursors - it does
+//     totalTime = timePerDivision * 12;  timePerSample = totalTime / (n - 1);
+// and the X axis simply stretches the array across the grid. appParam_sampleRate is the
+// top-bar readout, and for WAV it is clamped to the hardware ceiling so that readout stays
+// sane. Building the export on it stretched WAV frames by 12.5x; this is the same formula
+// the rest of the app uses, so a frame always occupies exactly its 12 divisions.
+function recFrameSampleRate(s, length) {
+    const tpd = (s && isFinite(s.tpd) && s.tpd > 0) ? s.tpd : 1;
+    return Math.max(1, (Math.max(2, length) - 1) / (12 * tpd));
+}
+
 // Captures the acquisition settings in force for the frame currently being snapshotted.
 // processParams() runs before processWaveforms() in doIteration(), and PRM/CH1/CH2 arrive in the
 // same #WAV2 response, so these values belong to THIS frame's samples rather than a neighbour's.
@@ -7659,6 +7674,7 @@ function recSnapshotSettings() {
         len: len,
         trigIdx: Math.max(0, Math.min(len - 1, Math.round(appParam_timeOffset * (len - 1)))),
         src: appParam_GeneralSignalSource,
+        intended: appParam_intendedSamples, // the real acquisition length, which WAV hides
         demo: (appParam_demoMode_Enabled == 'ON'),
         acq: appParam_acquisitionMode,
         ch1: { vpd: appParam_currVPD_CH1, vpos: param_CH1trueVerticalPos / 200, probe: appParam_CH1Probe, coupling: appParam_CH1Coupling, bw: appParam_CH1BWLimit },
@@ -7753,9 +7769,16 @@ function buildRecordingMetadata(sampleRate, ch2Enabled) {
 // acquisitions. NaN rather than 0 because 0 is a real voltage; NaN is skipped by PulseView's
 // min/max accumulation and renders as absent data. Long NaN runs compress to almost nothing.
 function nanRunToLEBytes(count) {
+    // Every full-size gap chunk is byte-identical, so build one and hand the same buffer to
+    // each entry. JSZip reads them at generateAsync() and never mutates them, which turns
+    // the memory cost of dead time from O(gap length) into O(1) - the reason the budget can
+    // now be generous. On disk a NaN run deflates about 1000:1 either way.
+    const shared = (count === recordGapChunkSamples);
+    if (shared && recNanChunk) return recNanChunk;
     const buf = new ArrayBuffer(count * 4);
     const dv = new DataView(buf);
     for (let i = 0; i < count; i++) dv.setFloat32(i * 4, NaN, true);
+    if (shared) recNanChunk = buf;
     return buf;
 }
 
@@ -7786,19 +7809,14 @@ function planRecordingTimeline(frames, sampleRate) {
         cursor = start + len;
     }
 
-    // The budget is on uncompressed samples: a NaN run costs nothing on disk but is fully
-    // materialised here, in the browser, and again in whatever opens the file.
-    let mode = "realtime";
-    if (cursor > recordMaxTimelineSamples) {
-        cursor = 0;
-        for (let i = 0; i < plan.length; i++) {
-            plan[i].gap = 0;
-            plan[i].start = cursor;
-            cursor += plan[i].len;
-        }
-        mode = "concatenated";
-    }
-    return { plan: plan, total: cursor, mode: mode, clamped: clamped, t0: t0 };
+    // The budget is not about file size - a NaN run deflates about 1000:1 - but about the
+    // samples every consumer has to materialise. Over it, the caller writes one file per
+    // frame instead: a timeline that has been squashed is actively wrong, whereas separate
+    // frames simply carry no timeline, and the sidecar still records where each one belongs.
+    return {
+        plan: plan, total: cursor, mode: "realtime", clamped: clamped, t0: t0,
+        oversize: cursor > recordMaxTimelineSamples
+    };
 }
 
 // Compact local timestamp YYYYMMDDThhmmss for the export filename.
@@ -7836,7 +7854,7 @@ function buildRecordingSidecar(timeline, ch2Enabled, warnings, segIndex, segCoun
             gap_before: p.gap,
             t_ms: s.t !== undefined ? (s.t - timeline.t0) : null,
             trigger_sample: s.trigIdx !== undefined ? s.trigIdx : null,
-            samplerate: s.sr, tpd: s.tpd,
+            samplerate: s.sr, tpd: s.tpd, intended_samples: s.intended,
             signal_source: s.src, demo: s.demo, acquisition_mode: s.acq
         };
         if (s.ch1) out.ch1 = chanSettings(s.ch1);
@@ -7864,9 +7882,12 @@ function buildRecordingSidecar(timeline, ch2Enabled, warnings, segIndex, segCoun
         samplerate: Math.round(sampleRate),
         samplerate_exact: sampleRate,
         samplerate_string: formatSamplerate(sampleRate),
-        // WAV frames arrive already processed, so the app can only estimate their rate from
-        // the frame length and then clamps it to the hardware ceiling - 50 ns/div computes
-        // 500 MHz and is reported as 200 MHz. Say so rather than implying a measurement.
+        // A WAV frame is the instrument's rendered screen trace: a fixed 300 points whatever
+        // the time/div, "already processed and interpolated" in the app's own words. The rate
+        // below therefore counts display points per second, not ADC samples - it is what
+        // makes the frame span its true 12 divisions, but it can exceed what the hardware can
+        // actually sample. intended_samples on each frame gives the real acquisition length.
+        samplerate_is_display_points: sources.indexOf("WAV") !== -1,
         samplerate_estimated: sources.indexOf("WAV") !== -1,
 
         sample_count: timeline.total,
@@ -7900,34 +7921,78 @@ function buildRecordingSidecar(timeline, ch2Enabled, warnings, segIndex, segCoun
     };
 }
 
-// Drops partial re-reads of an acquisition that was still filling.
+// Reassembles a rolling acquisition that was read repeatedly into one continuous stream.
 //
-// At 200 ms/div and slower a screen cannot be complete until 12 x time/div has elapsed, but
-// reads keep arriving every ~200 ms, so each returns whatever has accumulated. Consecutive
-// frames then grow — 186 samples, 314, 506 — and since the samplerate is derived from the
-// frame length, each apparent rate differs and each read becomes a file of its own. One such
-// recording produced 69 files, 67 of them single frames whose samples the later, fuller
-// reads already contained.
+// At 200 ms/div and slower the scope rolls: it keeps one acquisition running and the app
+// re-reads it every ~200 ms. Consecutive frames are therefore one acquisition seen through a
+// sliding window - measured on hardware, frame N+1 equals frame N shifted by exactly the
+// arrival interval, to a mean difference of 0.0000 V. Writing them as separate frames
+// duplicates most of the samples onto a timeline that cannot hold them.
 //
-// A strictly growing run at one time/div is that pattern, so keep only its last and fullest
-// member. A steady acquisition holds its length instead, so it is never touched.
-function collapsePartialReads(frames) {
-    if (!recordCollapsePartialReads || frames.length < 2) return { frames: frames, dropped: 0 };
-    const kept = [];
-    let dropped = 0;
-    for (let i = 0; i < frames.length; i++) {
-        const cur = frames[i], next = frames[i + 1];
-        // Same signal source as well as same time/div: a partial re-read is by definition
-        // the same acquisition through the same code path. Switching source changes the
-        // frame length too - a 13-sample DataBuffer frame followed by a 300-sample WAV one
-        // is two acquisitions, not one that grew - and without this the shorter of the pair
-        // was silently discarded.
-        const growing = next &&
-            cur.s && next.s && cur.s.tpd === next.s.tpd && cur.s.src === next.s.src &&
-            (cur.ch1 || []).length < (next.ch1 || []).length;
-        if (growing) dropped++; else kept.push(frames[i]);
+// True when `next` is `prev` advanced by `shift` samples: the tail of prev must equal the
+// head of next. A still-filling acquisition is the same test with shift = next.length -
+// prev.length, which compares prev against next's head - so one rule covers both.
+function recOverlapMatches(prev, next, shift) {
+    const overlap = next.length - shift;
+    const base = prev.length - overlap;
+    if (overlap < 32 || base < 0) return false;
+    const step = Math.max(1, Math.floor(overlap / 256)); // sampling the overlap is enough
+    for (let i = 0; i < overlap; i += step) {
+        const a = prev[base + i], b = next[i];
+        if (isNaN(a) !== isNaN(b)) return false;
+        if (!isNaN(a) && Math.abs(a - b) > 1e-6) return false;
     }
-    return { frames: kept, dropped: dropped };
+    return true;
+}
+
+// Searches outward from the shift the timestamps predict; the first exact match wins. A
+// timestamp cannot be trusted to the sample, and a periodic signal cannot be aligned by
+// content alone, so neither is used without the other.
+function recFindOverlapShift(prev, next, expected) {
+    const span = Math.max(4, Math.round(next.length * 0.05));
+    for (let d = 0; d <= span; d++) {
+        const candidates = (d === 0) ? [expected] : [expected - d, expected + d];
+        for (let c = 0; c < candidates.length; c++) {
+            const k = candidates[c];
+            if (k > 0 && k <= next.length && recOverlapMatches(prev, next, k)) return k;
+        }
+    }
+    return -1;
+}
+
+function stitchRollingFrames(frames, sampleRate) {
+    if (!recordStitchRollingFrames || frames.length < 2) {
+        return { frames: frames, stitched: 0, dropped: 0 };
+    }
+    const out = [];
+    let stitched = 0, dropped = 0;
+    for (let i = 0; i < frames.length; i++) {
+        const cur = frames[i];
+        const prev = out.length ? out[out.length - 1] : null;
+        const sameRun = prev && prev.s && cur.s &&
+            prev.s.tpd === cur.s.tpd && prev.s.src === cur.s.src;
+        if (!sameRun) {
+            out.push({ ch1: cur.ch1, ch2: cur.ch2, s: cur.s, tLast: cur.s ? cur.s.t : 0 });
+            continue;
+        }
+        const a = prev.ch1 || [], b = cur.ch1 || [];
+        // Predict from the time since the last read that was folded in, not since the start.
+        const dtMs = (cur.s.t || 0) - (prev.tLast || 0);
+        let shift = recFindOverlapShift(a, b, Math.round(dtMs / 1000 * sampleRate));
+        if (shift < 0 && b.length > a.length) {
+            shift = recOverlapMatches(a, b, b.length - a.length) ? b.length - a.length : -1;
+        }
+        if (shift > 0) {
+            const subsumed = (a.length <= b.length - shift + 0); // prev was wholly a prefix
+            prev.ch1 = a.concat(b.slice(b.length - shift));
+            if (prev.ch2 && cur.ch2) prev.ch2 = prev.ch2.concat(cur.ch2.slice(cur.ch2.length - shift));
+            prev.tLast = cur.s.t;
+            if (subsumed) dropped++; else stitched++;
+            continue;
+        }
+        out.push({ ch1: cur.ch1, ch2: cur.ch2, s: cur.s, tLast: cur.s ? cur.s.t : 0 });
+    }
+    return { frames: out, stitched: stitched, dropped: dropped };
 }
 
 // Splits the captured frames into runs of constant samplerate.
@@ -7939,7 +8004,7 @@ function collapsePartialReads(frames) {
 function splitRecordingBySamplerate(frames) {
     const runs = [];
     for (let i = 0; i < frames.length; i++) {
-        const rate = (frames[i].s && frames[i].s.sr) ? frames[i].s.sr : recordSampleRate;
+        const rate = recFrameSampleRate(frames[i].s, (frames[i].ch1 || []).length);
         if (!runs.length || runs[runs.length - 1].sampleRate !== rate) {
             runs.push({ sampleRate: rate, frames: [] });
         }
@@ -8013,14 +8078,16 @@ function buildRecordingSegment(frames, sampleRate, segIndex, segCount, stamp) {
     }
 
     const warnings = [];
-    if (timeline.mode === "concatenated") {
-        warnings.push("Timeline exceeded " + recordMaxTimelineSamples + " samples/channel; gaps dropped and frames concatenated.");
-        log("WARNING: " + warnings[warnings.length - 1]);
-        recShowMessage("Recording too long for a real timeline - frames concatenated");
-    } else if (timeline.clamped > 0) {
+    if (timeline.clamped > 0) {
         warnings.push(timeline.clamped + " frame(s) overlapped in wall-clock time and were placed back to back.");
         log("NOTE: " + warnings[warnings.length - 1] + " A frame spans 12 x time/div of signal, " +
-            "which at slow timebases exceeds the interval between acquisitions.");
+            "which at slow timebases can exceed the interval between acquisitions.");
+    }
+    if (segCount > 1 && frames.length === 1) {
+        warnings.push("This file holds a single frame. The recording needed more samples than " +
+            recordMaxTimelineSamples + " per channel to place its frames on one timeline, so each " +
+            "frame was written separately rather than squashed onto a false one. t_ms gives its " +
+            "true offset within the recording.");
     }
     if (segCount > 1) {
         warnings.push("The samplerate changed mid-recording; this is segment " + segIndex + " of " +
@@ -8099,16 +8166,45 @@ function exportRecordingSR() {
         log("ERROR: JSZip library not loaded; cannot build the .sr file.");
         return;
     }
-    const collapsed = collapsePartialReads(recordedFrames);
-    if (collapsed.dropped > 0) {
-        log("Dropped " + collapsed.dropped + " partial re-read(s) of a still-filling acquisition; " +
-            "their samples are contained in the fuller read that followed.");
-    }
     if (recDroppedFrames > 0) {
         log("Skipped " + recDroppedFrames + " frame(s) that held no usable samples. Switching the " +
             "signal source mid-recording can yield one of these.");
     }
-    const segments = splitRecordingBySamplerate(collapsed.frames);
+
+    // Stitch per samplerate run, since the shift is predicted from that run's rate.
+    let frames = [];
+    let stitched = 0, prefixes = 0;
+    splitRecordingBySamplerate(recordedFrames).forEach((run) => {
+        const r = stitchRollingFrames(run.frames, run.sampleRate);
+        stitched += r.stitched; prefixes += r.dropped;
+        frames = frames.concat(r.frames);
+    });
+    if (stitched > 0) {
+        log("Reassembled " + (stitched + 1) + " reads of a rolling acquisition into one continuous " +
+            "stream; the overlap between them was identical, so only the new samples were kept.");
+    }
+    if (prefixes > 0) {
+        log("Dropped " + prefixes + " partial read(s) of an acquisition that was still filling; " +
+            "each was a prefix of the read that followed.");
+    }
+
+    let segments = splitRecordingBySamplerate(frames);
+
+    // Over budget, every frame becomes its own file rather than being squashed together.
+    const oversize = segments.some((seg) =>
+        planRecordingTimeline(seg.frames, seg.sampleRate).oversize);
+    if (oversize) {
+        const single = [];
+        segments.forEach((seg) => seg.frames.forEach((f) =>
+            single.push({ sampleRate: seg.sampleRate, frames: [f] })));
+        segments = single;
+        log("This recording spans more wall-clock time than " + recordMaxTimelineSamples +
+            " samples/channel can hold at its samplerate, so each frame is written to its own file " +
+            "rather than squashed onto a timeline that would be wrong. Each sidecar's t_ms gives the " +
+            "frame's true offset. Recording at a slower time/div keeps it in one file.");
+        recShowMessage("Too many samples for one timeline - one file per frame");
+    }
+
     const stamp = recordingTimestamp();
     if (segments.length > 1) {
         log("The samplerate changed during the recording; writing " + segments.length +
