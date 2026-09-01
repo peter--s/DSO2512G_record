@@ -18,8 +18,10 @@ self‑contained `app_clean.html` (or to its extracted `app_clean_extracted.js` 
 3. **START** — acquisition begins; the **RECORD** button becomes enabled.
 4. Click **RECORD** to begin capturing frames; the button lights up and changes to **SAVE**.
 5. Adjust the scope as needed; every newly acquired frame is captured.
-6. Click **SAVE** — a `DSO2512G_recording_<timestamp>.sr` file is downloaded.
-7. Open the `.sr` in PulseView.
+6. Click **SAVE** — a `DSO2512G_recording_<timestamp>.sr` file is downloaded. If the
+   samplerate changed while recording you get one `…_seg<k>.sr` per run instead, and past
+   8 of those a single `…_segments.zip` holding them all.
+7. Open the `.sr` in PulseView, extracting the `.zip` first if you got one.
 
 ### What is recorded
 - **Values:** calibrated volts. The acquired samples are raw screen positions, so the
@@ -146,10 +148,20 @@ they are what makes the export agree with the scope's own on‑screen readouts.
 
 Standard library only — no npm, no pip. The suite pins `app_record.html` against the patch
 (byte for byte), checks the `.sr` structural invariants libsigrok depends on, and pins the
-volts conversion against two real captures showing the same ~312 V bus at 50 V/div and at
-100 V/div. Where a JavaScript engine is available (`jsc` on macOS, otherwise `node` or
-`d8`) it also parses the generated app and exercises the export helpers directly; without
-one those tests skip. Tests needing `app_clean.html` skip too, since it is not in the repo.
+volts conversion against recorded captures. Where a JavaScript engine is available (`jsc` on
+macOS, otherwise `node` or `d8`) it also parses the generated app and exercises the export
+path directly; without one those tests skip. Tests needing `app_clean.html` skip too, since
+it is not in the repo.
+
+The fixtures in `tests/fixtures/` are real hardware captures spanning 200 ns/div to
+500 ms/div, both timeline modes, one and two channels, demo and live acquisition, and
+splits of 2, 6, 13, 30 and 31 segments. Between them they establish the conversion against
+the instrument's own readouts — one generator output through two channels four scales and
+two divisions apart agrees to 0.091 V rms against a 0.082 V quantisation floor, and a
+square's unipolar baseline lands on 0.000 V from a channel sitting 2.58 divisions off
+centre. The two pre-fix captures are kept deliberately: applying the conversion to them
+offline reproduces the scope's on-screen `Mean` and `PKPK` figures, which is what pins the
+formula independently of the browser.
 
 To check an export you produced yourself:
 
