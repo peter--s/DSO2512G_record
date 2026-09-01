@@ -96,6 +96,8 @@ def recording_source(emit_trigger_channel=False):
         "var param_triggerCH1CH2 = 0, param_triggerEdge = 0, appParam_triggerMode = 'Auto';\n"
         "var isPlotting = false;\n"
         "const verticalScale = 1, verticalOffsetCH1 = 0.005, verticalOffsetCH2 = 0.008;\n"
+        "var appParam_message = '', appParam_lastMessage = '', appParam_messageChannel = '';\n"
+        "var appParam_messageCountdown = 0;\n"
     )
     return stubs + src
 

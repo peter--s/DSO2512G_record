@@ -26,6 +26,11 @@ FIX = os.path.join(HERE, "fixtures")
 
 
 def captures():
+    """Every capture that is expected to satisfy the invariants.
+
+    fixtures/known-bad/ is deliberately excluded: those were recorded before a fix and
+    violate an invariant on purpose, so they are asserted against individually instead.
+    """
     paths = sorted(glob.glob(os.path.join(FIX, "*.sr")))
     extra = os.environ.get("DSO2512G_SR", "")
     paths += [os.path.expanduser(p) for p in extra.split(os.pathsep) if p.strip()]

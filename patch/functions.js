@@ -13,6 +13,7 @@ function toggleRecording() {
         recPendingCH1 = null;
         recPendingCH2 = null;
         recPendingSettings = null;
+        recDroppedFrames = 0;
         recordSampleRate = appParam_sampleRate; // .sr carries a single samplerate; capture it now
         appParam_isRecording = true;
         btn.textContent = "SAVE";
@@ -30,6 +31,24 @@ function toggleRecording() {
         }
         if (!isPlotting) btn.disabled = true; // plotting already stopped -> re-disable RECORD
     }
+}
+
+// True when an array holds at least one usable reading. A frame of nothing but NaN is a
+// failed acquisition rather than a quiet one.
+function recFrameHasSamples(arr) {
+    if (!arr) return false;
+    for (let i = 0; i < arr.length; i++) {
+        if (isFinite(arr[i])) return true;
+    }
+    return false;
+}
+
+// Shows one of the recorder's own messages, which want longer on screen than the app's
+// default. drawMessage() runs once per doIteration(), so seconds convert at the iteration
+// interval; the override is consumed by the first draw and leaves other callers alone.
+function recShowMessage(text) {
+    appParam_messageFrames = Math.max(1, Math.round(recordMessageSeconds * 1000 / 100));
+    showMessage(text, "ALL");
 }
 
 // Captures the acquisition settings in force for the frame currently being snapshotted.
@@ -206,6 +225,12 @@ function buildRecordingSidecar(timeline, ch2Enabled, warnings, segIndex, segCoun
         vpd: cfg.vpd, vpos: cfg.vpos, probe: cfg.probe, coupling: cfg.coupling, bwlimit: cfg.bw
     });
 
+    const sources = [];
+    timeline.plan.forEach((p) => {
+        const src = (p.frame.s || {}).src;
+        if (src && sources.indexOf(src) === -1) sources.push(src);
+    });
+
     const frames = timeline.plan.map((p, i) => {
         const s = p.frame.s || {};
         const out = {
@@ -243,6 +268,10 @@ function buildRecordingSidecar(timeline, ch2Enabled, warnings, segIndex, segCoun
         samplerate: Math.round(sampleRate),
         samplerate_exact: sampleRate,
         samplerate_string: formatSamplerate(sampleRate),
+        // WAV frames arrive already processed, so the app can only estimate their rate from
+        // the frame length and then clamps it to the hardware ceiling - 50 ns/div computes
+        // 500 MHz and is reported as 200 MHz. Say so rather than implying a measurement.
+        samplerate_estimated: sources.indexOf("WAV") !== -1,
 
         sample_count: timeline.total,
         frame_count: frames.length,
@@ -255,20 +284,49 @@ function buildRecordingSidecar(timeline, ch2Enabled, warnings, segIndex, segCoun
             note: "Frame times are arrival timestamps, so placement is accurate to about one acquisition interval."
         },
 
-        // Baked into every sample by convertToWaveArray(); recorded so downstream analysis can
-        // account for them. They are what makes the export agree with the scope's own readouts,
-        // so they are deliberately not removed.
-        app_calibration: {
+        // Baked into every sample by convertToWaveArray(), but only on the DataBuffer paths:
+        // the WAV branch negates instead and applies no offset at all. Reporting them
+        // unconditionally would assert something untrue of a WAV capture, so they appear only
+        // when some frame here actually carried them. They are deliberately not removed from
+        // the samples - they are what makes the export agree with the scope's own readouts.
+        app_calibration: sources.every((s) => s === "WAV") ? { verticalScale: verticalScale } : {
             verticalScale: verticalScale,
             verticalOffsetCH1: verticalOffsetCH1,
-            verticalOffsetCH2: verticalOffsetCH2
+            verticalOffsetCH2: verticalOffsetCH2,
+            applies_to: sources.length > 1 ? "DataBuffer frames only" : "all frames"
         },
+        signal_sources: sources,
         volts_formula: "volts = (raw - vpos) * 8 * vpd",
 
         channels: channels,
         frames: frames,
         warnings: warnings || []
     };
+}
+
+// Drops partial re-reads of an acquisition that was still filling.
+//
+// At 200 ms/div and slower a screen cannot be complete until 12 x time/div has elapsed, but
+// reads keep arriving every ~200 ms, so each returns whatever has accumulated. Consecutive
+// frames then grow — 186 samples, 314, 506 — and since the samplerate is derived from the
+// frame length, each apparent rate differs and each read becomes a file of its own. One such
+// recording produced 69 files, 67 of them single frames whose samples the later, fuller
+// reads already contained.
+//
+// A strictly growing run at one time/div is that pattern, so keep only its last and fullest
+// member. A steady acquisition holds its length instead, so it is never touched.
+function collapsePartialReads(frames) {
+    if (!recordCollapsePartialReads || frames.length < 2) return { frames: frames, dropped: 0 };
+    const kept = [];
+    let dropped = 0;
+    for (let i = 0; i < frames.length; i++) {
+        const cur = frames[i], next = frames[i + 1];
+        const growing = next &&
+            cur.s && next.s && cur.s.tpd === next.s.tpd &&
+            (cur.ch1 || []).length < (next.ch1 || []).length;
+        if (growing) dropped++; else kept.push(frames[i]);
+    }
+    return { frames: kept, dropped: dropped };
 }
 
 // Splits the captured frames into runs of constant samplerate.
@@ -357,7 +415,7 @@ function buildRecordingSegment(frames, sampleRate, segIndex, segCount, stamp) {
     if (timeline.mode === "concatenated") {
         warnings.push("Timeline exceeded " + recordMaxTimelineSamples + " samples/channel; gaps dropped and frames concatenated.");
         log("WARNING: " + warnings[warnings.length - 1]);
-        showMessage("Recording too long for a real timeline - frames concatenated", "ALL");
+        recShowMessage("Recording too long for a real timeline - frames concatenated");
     } else if (timeline.clamped > 0) {
         warnings.push(timeline.clamped + " frame(s) overlapped in wall-clock time and were placed back to back.");
         log("NOTE: " + warnings[warnings.length - 1] + " A frame spans 12 x time/div of signal, " +
@@ -427,7 +485,7 @@ function exportRecordingBundle(segments, stamp) {
             downloadRecordingBlob(blob, filename);
             log("Saved " + segments.length + " segments (" + total + " frame(s)) to " +
                 filename + ". Extract it to get the .sr files.");
-            showMessage("Saved " + segments.length + " segments in one .zip", "ALL");
+            recShowMessage("Saved " + segments.length + " segments in one .zip");
         })
         .catch((err) => {
             log("ERROR building " + filename + ": " + err.message);
@@ -440,13 +498,22 @@ function exportRecordingSR() {
         log("ERROR: JSZip library not loaded; cannot build the .sr file.");
         return;
     }
-    const segments = splitRecordingBySamplerate(recordedFrames);
+    const collapsed = collapsePartialReads(recordedFrames);
+    if (collapsed.dropped > 0) {
+        log("Dropped " + collapsed.dropped + " partial re-read(s) of a still-filling acquisition; " +
+            "their samples are contained in the fuller read that followed.");
+    }
+    if (recDroppedFrames > 0) {
+        log("Skipped " + recDroppedFrames + " frame(s) that held no usable samples. Switching the " +
+            "signal source mid-recording can yield one of these.");
+    }
+    const segments = splitRecordingBySamplerate(collapsed.frames);
     const stamp = recordingTimestamp();
     if (segments.length > 1) {
         log("The samplerate changed during the recording; writing " + segments.length +
             " files, one per samplerate (a .sr carries only one). The rate is derived from the " +
             "acquired frame length, so the time/div, the channel mode and demo mode all move it.");
-        showMessage("Samplerate changed - saving " + segments.length + " files", "ALL");
+        recShowMessage("Samplerate changed - saving " + segments.length + " files");
     }
     // A recording that fragments into many one-frame files is almost always a slow timebase
     // rather than someone turning the knob repeatedly. At 200 ms/div and slower the scope
@@ -459,7 +526,7 @@ function exportRecordingSR() {
             "slow time/div the acquisition is read while it is still filling, so the frame length " +
             "grows with each read and the reported samplerate describes how full the buffer was, " +
             "not how fast it was sampled. Record at a faster time/div for a usable timeline.");
-        showMessage("Slow time/div - samplerates describe buffer fill, not sampling rate", "ALL");
+        recShowMessage("Slow time/div - samplerates describe buffer fill, not sampling rate");
     }
     // Past a handful, deliver one archive instead of many downloads. A browser will stop
     // starting downloads well before thirty and will not say that it did.
