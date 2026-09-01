@@ -13,3 +13,7 @@ const recordEmitTriggerChannel = false; // true -> also emit a TRIG logic channe
 const recordMaxTimelineSamples = 20000000; // per channel; above this, gaps are dropped and frames concatenated
 const recordGapChunkSamples = 1048576; // gap runs are split into chunks of this many samples (libsigrok's CHUNKSIZE)
 const recordMaxSeparateDownloads = 8; // beyond this many segments, deliver one .zip instead (browsers drop excess downloads silently)
+const recordCollapsePartialReads = true; // drop partial re-reads of a still-filling acquisition, keeping the fullest of each run
+const recordMessageSeconds = 5; // how long the recorder's own on-screen messages stay up
+let appParam_messageFrames = 0; // one-shot override for the next message's countdown (0 = the app's own default)
+let recDroppedFrames = 0; // frames discarded because they held no usable samples

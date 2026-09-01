@@ -37,6 +37,11 @@
       "payload_file": "patch/disable_button.js"
     },
     {
+      "name": "message_duration",
+      "anchor": "            appParam_lastMessage = appParam_message;\n            appParam_messageCountdown = 10;",
+      "payload_file": "patch/message_duration.js"
+    },
+    {
       "name": "functions",
       "anchor": "iterateInterval = setInterval(doIteration, 100);\n    }\n}",
       "payload_file": "patch/functions.js"
