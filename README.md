@@ -88,7 +88,7 @@ nothing more. The sigrok v3 format solves this properly, with a per-frame packet
 [explicitly unimplemented](https://sigrok.org/wiki/File_format:Sigrok/v3). So the timeline
 has to be built out of samples, and these are the rules used.
 
-**A frame's samplerate is `(length − 1) / (12 × time-per-div)`.** This is the app's own rule —
+**A frame's samplerate is `(intended samples − 1) / (12 × time-per-div)`.** This is the app's own rule —
 everywhere it converts a sample index to a time it computes `totalTime = 12 × tpd` and
 divides by `n − 1`, and it draws by stretching the array across the grid. `appParam_sampleRate`
 is only the top-bar readout, and for `WAV` it is clamped to the hardware ceiling to keep that
@@ -102,6 +102,16 @@ what makes the frame span its true duration, and it can exceed what the instrume
 sample. The sidecar flags this as `samplerate_is_display_points`, and each frame records
 `intended_samples`, the real acquisition length. Record from `DataBuffer` if you want samples
 rather than the scope's rendering of them.
+
+The count is the *intended* acquisition length, not the array's length. In roll mode the
+app draws a partly-filled acquisition into the right-hand part of the grid rather than
+stretching it across the width — `processForPlotting()` left-pads by
+`width − (length / intendedDrawnSamples) × width`, so pixels per sample come out as
+`width / intendedSamples` however full the buffer is. Time per sample is therefore constant
+while the buffer fills, which is why the display stays correct throughout. Using the array
+length instead made one 100 Hz signal read as 16, 20 and 22 Hz across three consecutive
+reads of the same acquisition, and gave each read a rate of its own — which is what split
+such recordings into dozens of files.
 
 **Dead time between frames is NaN.** PulseView shows it as absent data, and a NaN run
 deflates about 1000:1, so it costs nothing on disk. Frames are placed at their true

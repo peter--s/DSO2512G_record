@@ -7650,16 +7650,23 @@ function recShowMessage(text) {
 
 // Samples per second for one frame, using the app's own rule.
 //
-// The app never derives time from appParam_sampleRate. Everywhere it turns a sample index
-// into a time - filterLowPass(), the measurements, the cursors - it does
-//     totalTime = timePerDivision * 12;  timePerSample = totalTime / (n - 1);
-// and the X axis simply stretches the array across the grid. appParam_sampleRate is the
-// top-bar readout, and for WAV it is clamped to the hardware ceiling so that readout stays
-// sane. Building the export on it stretched WAV frames by 12.5x; this is the same formula
-// the rest of the app uses, so a frame always occupies exactly its 12 divisions.
+// The app never derives time from appParam_sampleRate - that is the top-bar readout, clamped
+// to the hardware ceiling for WAV so it stays sane, and building the export on it stretched
+// WAV frames by 12.5x. Everywhere the app actually needs time it divides 12 * tpd by the
+// sample count, so a complete frame occupies exactly its twelve divisions.
+//
+// The count that matters is the INTENDED one, not the array's length. In roll mode the app
+// draws a partly-filled acquisition into the right-hand part of the grid rather than
+// stretching it across the whole width - processForPlotting() left-pads by
+//     width - (length / intendedDrawnSamples) * width
+// so its pixels-per-sample works out to width / intendedSamples whatever the fill level.
+// Time per sample is therefore constant while the buffer fills, which is why the display
+// stays correct. Using the array length instead made one 100 Hz signal read as 16, 20 and
+// 22 Hz across three consecutive partial reads of the same acquisition.
 function recFrameSampleRate(s, length) {
     const tpd = (s && isFinite(s.tpd) && s.tpd > 0) ? s.tpd : 1;
-    return (Math.max(2, length) - 1) / (12 * tpd);
+    const intended = (s && isFinite(s.intended) && s.intended >= 2) ? s.intended : length;
+    return (Math.max(2, intended) - 1) / (12 * tpd);
 }
 
 // Captures the acquisition settings in force for the frame currently being snapshotted.

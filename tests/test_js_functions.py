@@ -748,3 +748,74 @@ class TestStitchBeforeSplit(unittest.TestCase):
         warnings = run_js_json(harness)
         self.assertTrue(any("below 1 Sa/s" in w for w in warnings),
                         "a sub-Hz rate must be reported, got %r" % (warnings,))
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestPartialReadSampleRate(unittest.TestCase):
+    """A partly-filled acquisition keeps the acquisition's rate, not its own length's.
+
+    In roll mode the app draws an incomplete waveform into the right-hand part of the grid
+    instead of stretching it across the width — processForPlotting() left-pads by
+    width - (length / intendedDrawnSamples) * width, so pixels per sample come out as
+    width / intendedSamples however full the buffer is. Time per sample is constant while it
+    fills, which is why the screen stays right.
+
+    Deriving the rate from the array length instead made one 100 Hz signal read as 16, 20 and
+    22 Hz across three consecutive reads of the same acquisition.
+    """
+
+    # Real reads at 500 ms/div from DSO2512G_recording_20260901T012911, where a complete
+    # acquisition is 4801 samples and the generator was set to 100 Hz.
+    READS = [778, 954, 1082, 4801]
+    FULL = 4801
+    TPD = 0.5
+    PERIOD_SAMPLES = 8          # measured: 6 high + 2 low
+
+    def _rates(self, intended):
+        harness = recording_source() + (
+            "\n__emit(JSON.stringify(%s.map(function (n) {\n"
+            "  return recFrameSampleRate({tpd: %s, intended: %s}, n); })));\n"
+            % (json.dumps(self.READS), self.TPD, json.dumps(intended))
+        )
+        return run_js_json(harness)
+
+    def test_every_read_of_one_acquisition_shares_its_rate(self):
+        rates = self._rates(self.FULL)
+        self.assertEqual(len(set(rates)), 1, "partial reads disagreed on the rate: %s" % rates)
+        self.assertAlmostEqual(rates[0], (self.FULL - 1) / (12 * self.TPD), places=6)
+
+    def test_the_signal_reads_the_same_frequency_in_every_read(self):
+        """The measurement that exposed this: the generator never changed."""
+        for rate in self._rates(self.FULL):
+            self.assertAlmostEqual(rate / self.PERIOD_SAMPLES, 100.0, delta=0.5)
+
+    def test_using_the_array_length_would_be_wrong(self):
+        """Guards the regression directly — without `intended` the rates diverge."""
+        rates = self._rates(None)
+        self.assertGreater(len(set(rates)), 1, "expected the broken form to disagree")
+        freqs = [r / self.PERIOD_SAMPLES for r in rates]
+        self.assertLess(min(freqs), 20.0, "the broken form under-reports badly: %s" % freqs)
+
+    def test_a_complete_frame_is_unaffected(self):
+        """Outside roll mode length equals intended, so the rule is unchanged."""
+        harness = recording_source() + (
+            "\n__emit(JSON.stringify([\n"
+            "  recFrameSampleRate({tpd: 0.005, intended: 2401}, 2401),\n"
+            "  recFrameSampleRate({tpd: 0.005}, 2401)]));\n"
+        )
+        with_intended, without = run_js_json(harness)
+        self.assertAlmostEqual(with_intended, without, places=6)
+        self.assertAlmostEqual(with_intended, 40000.0, places=3)
+
+    def test_partial_reads_no_longer_fragment_the_export(self):
+        """Sharing a rate means sharing a segment, which removes the fragmentation at its
+        source rather than compensating for it afterwards."""
+        harness = recording_source() + (
+            "\nvar frames = %s.map(function (n) {\n"
+            "  return {ch1: new Array(n).fill(0.25), ch2: null,\n"
+            "          s: {t: 0, tpd: %s, len: n, intended: %d, src: 'DataBuffer2'}}; });\n"
+            "__emit(JSON.stringify(splitRecordingBySamplerate(frames).length));\n"
+            % (json.dumps(self.READS), self.TPD, self.FULL)
+        )
+        self.assertEqual(run_js_json(harness), 1,
+                         "reads of one acquisition must not split into separate files")
