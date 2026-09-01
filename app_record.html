@@ -7917,8 +7917,13 @@ function collapsePartialReads(frames) {
     let dropped = 0;
     for (let i = 0; i < frames.length; i++) {
         const cur = frames[i], next = frames[i + 1];
+        // Same signal source as well as same time/div: a partial re-read is by definition
+        // the same acquisition through the same code path. Switching source changes the
+        // frame length too - a 13-sample DataBuffer frame followed by a 300-sample WAV one
+        // is two acquisitions, not one that grew - and without this the shorter of the pair
+        // was silently discarded.
         const growing = next &&
-            cur.s && next.s && cur.s.tpd === next.s.tpd &&
+            cur.s && next.s && cur.s.tpd === next.s.tpd && cur.s.src === next.s.src &&
             (cur.ch1 || []).length < (next.ch1 || []).length;
         if (growing) dropped++; else kept.push(frames[i]);
     }
