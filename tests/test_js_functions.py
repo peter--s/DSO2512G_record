@@ -497,7 +497,7 @@ class TestPartialReadCollapsing(unittest.TestCase):
         harness = recording_source() + (
             "\nvar frames = %s.map(function (f) {\n"
             "  return {ch1: new Array(f.len).fill(0.25), ch2: null,\n"
-            "          s: {tpd: %s, len: f.len}}; });\n"
+            "          s: {tpd: %s, len: f.len, src: 'DataBuffer2'}}; });\n"
             "var r = collapsePartialReads(frames);\n"
             "__emit(JSON.stringify({kept: r.frames.map(function (f) { return f.ch1.length; }),\n"
             "                       dropped: r.dropped}));\n" % (json.dumps(frames), tpd)
@@ -529,6 +529,45 @@ class TestPartialReadCollapsing(unittest.TestCase):
         # 4682 grows into the 4801 that follows, so it is a partial read of that run too.
         self.assertEqual(r["kept"], [4801, 4801, 4801, 1866, 3994, 4801, 4801])
         self.assertEqual(r["dropped"], 10)
+
+    def test_a_source_switch_is_not_a_partial_read(self):
+        """Switching signal source changes the frame length at the same time/div.
+
+        A 13-sample DataBuffer frame followed by a 300-sample WAV one is two separate
+        acquisitions, not one that grew, so neither may be discarded. Without the source
+        check the shorter of the pair was silently dropped — found on a real recording that
+        switched sources six times.
+        """
+        frames = [{"len": 13, "src": "DataBuffer"},
+                  {"len": 300, "src": "WAV"},
+                  {"len": 300, "src": "WAV"},
+                  {"len": 13, "src": "DataBuffer2"}]
+        harness = recording_source() + (
+            "\nvar frames = %s.map(function (f) {\n"
+            "  return {ch1: new Array(f.len).fill(0.25), ch2: null,\n"
+            "          s: {tpd: 1e-8, len: f.len, src: f.src}}; });\n"
+            "var r = collapsePartialReads(frames);\n"
+            "__emit(JSON.stringify({kept: r.frames.map(function (f) { return f.ch1.length; }),\n"
+            "                       dropped: r.dropped}));\n" % json.dumps(frames)
+        )
+        r = run_js_json(harness)
+        self.assertEqual(r["dropped"], 0, "no frame may be lost to a source switch")
+        self.assertEqual(r["kept"], [13, 300, 300, 13])
+
+    def test_growth_within_one_source_is_still_collapsed(self):
+        """The real case must keep working: one source, one time/div, a filling buffer."""
+        frames = [{"len": n, "src": "DataBuffer2"} for n in (186, 314, 506, 4801)]
+        harness = recording_source() + (
+            "\nvar frames = %s.map(function (f) {\n"
+            "  return {ch1: new Array(f.len).fill(0.25), ch2: null,\n"
+            "          s: {tpd: 0.5, len: f.len, src: f.src}}; });\n"
+            "var r = collapsePartialReads(frames);\n"
+            "__emit(JSON.stringify({kept: r.frames.map(function (f) { return f.ch1.length; }),\n"
+            "                       dropped: r.dropped}));\n" % json.dumps(frames)
+        )
+        r = run_js_json(harness)
+        self.assertEqual(r["kept"], [4801])
+        self.assertEqual(r["dropped"], 3)
 
     def test_a_length_change_at_a_new_timebase_is_not_a_partial_read(self):
         """Growth only counts within one time/div; a real timebase change must survive."""
