@@ -1,0 +1,12 @@
+# Build inputs, not redistributed here (see README "Involved Files"):
+#   app_clean.html  - produced from Hi-Ban's app by js_analyzer.py --clean
+#   jszip.min.js    - Stuart Knightley's JSZip 3.10.1
+app_clean.html
+app_clean_extracted.html
+app_clean_extracted.js
+jszip.min.js
+
+# Written by apply_record_feature.py when it overwrites an existing output
+*.bak
+
+__pycache__/
