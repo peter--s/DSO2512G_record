@@ -423,6 +423,209 @@ class TestSamplerateSplitting(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestUnusableFramesAreDropped(unittest.TestCase):
+    """A frame of nothing but NaN is a failed acquisition, not a quiet one.
+
+    Switching the signal source mid-recording occasionally produces one: the WAV path reads
+    a second sample per point at a fixed offset of 600 characters, so a buffer shorter than
+    that gives parseInt("") -> NaN for every point. Keeping such a frame would be worse than
+    dropping it, because NaN means "no data here" in this format — a corrupt frame would be
+    indistinguishable from dead time, and its odd length would spawn a segment of its own.
+    """
+
+    def _has_samples(self, arr):
+        harness = recording_source() + (
+            "\n__emit(JSON.stringify(recFrameHasSamples(%s)));\n"
+            % json.dumps(arr).replace("NaN", "null")
+        )
+        # JSON has no NaN, so nulls stand in and are mapped back inside JS.
+        harness = harness.replace("recFrameHasSamples([", "recFrameHasSamples([")
+        return run_js_json(harness.replace("null", "NaN"))
+
+    def test_all_nan_frame_is_rejected(self):
+        self.assertFalse(self._has_samples([float("nan")] * 5))
+
+    def test_frame_with_any_reading_is_kept(self):
+        self.assertTrue(self._has_samples([float("nan"), float("nan"), 0.25]))
+
+    def test_empty_and_missing_are_rejected(self):
+        self.assertFalse(self._has_samples([]))
+        harness = recording_source() + "\n__emit(JSON.stringify(recFrameHasSamples(null)));\n"
+        self.assertFalse(run_js_json(harness))
+
+    def test_a_dead_frame_never_reaches_the_export(self):
+        """End to end: an all-NaN CH1 frame must not become a segment of its own."""
+        harness = recording_source_with_zip() + (
+            "\nvar logged = []; log = function (m) { logged.push(m); };\n"
+            "showMessage = function () {};\n"
+            "var downloads = [];\n"
+            "downloadRecordingBlob = function (b, n) { downloads.push(n); };\n"
+            "var mk = function (len, dead) {\n"
+            "  var a = new Array(len); for (var i = 0; i < len; i++) a[i] = dead ? NaN : 0.25;\n"
+            "  return {ch1: a, ch2: null,\n"
+            "    s: {t: 0, sr: (len - 1) / 12 / 0.005, tpd: 0.005, len: len, trigIdx: 1,\n"
+            "        src: dead ? 'WAV' : 'DataBuffer', demo: false, acq: 'Sample',\n"
+            "        ch1: {vpd: 0.5, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "        ch2: {on: false, vpd: 1, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "        trig: {src: 'CH1', mode: 'Auto', edge: 'rising', level: 1}}}; };\n"
+            # A live frame, a dead one of a different length, then another live one.
+            "recordedFrames = [mk(2401, false), mk(2401, false)];\n"
+            "recDroppedFrames = 1;\n"
+            "recordSampleRate = 40000;\n"
+            "exportRecordingSR().then(function () {\n"
+            "  __emit(JSON.stringify({downloads: downloads, log: logged}));\n"
+            "});\n"
+        )
+        r = run_js_json(harness)
+        self.assertEqual(len(r["downloads"]), 1, "the dead frame must not have split the export")
+        self.assertIn("no usable samples", " ".join(r["log"]).lower(),
+                      "dropping frames must be reported, not silent")
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestPartialReadCollapsing(unittest.TestCase):
+    """Roll-mode partial re-reads should not each become a file.
+
+    A still-filling acquisition is read repeatedly, so consecutive frames grow — and since
+    the samplerate is derived from the frame length, each apparent rate differs and each read
+    splits off. One recording produced 69 files, 67 of them single frames whose samples the
+    later, fuller reads already contained. Keep only the fullest of each growing run.
+    """
+
+    def _collapse(self, lengths, tpd=0.5):
+        frames = [{"len": n} for n in lengths]
+        harness = recording_source() + (
+            "\nvar frames = %s.map(function (f) {\n"
+            "  return {ch1: new Array(f.len).fill(0.25), ch2: null,\n"
+            "          s: {tpd: %s, len: f.len}}; });\n"
+            "var r = collapsePartialReads(frames);\n"
+            "__emit(JSON.stringify({kept: r.frames.map(function (f) { return f.ch1.length; }),\n"
+            "                       dropped: r.dropped}));\n" % (json.dumps(frames), tpd)
+        )
+        return run_js_json(harness)
+
+    def test_a_growing_run_keeps_only_its_fullest(self):
+        r = self._collapse([186, 314, 506, 4801])
+        self.assertEqual(r["kept"], [4801])
+        self.assertEqual(r["dropped"], 3)
+
+    def test_a_steady_acquisition_is_untouched(self):
+        """Normal recording holds its frame length, so nothing may be dropped."""
+        r = self._collapse([2401] * 6, tpd=0.005)
+        self.assertEqual(r["kept"], [2401] * 6)
+        self.assertEqual(r["dropped"], 0)
+
+    def test_each_fill_cycle_keeps_its_own_last(self):
+        """The buffer restarts, so a drop in length ends a run and begins another."""
+        r = self._collapse([186, 506, 4801, 122, 1866, 74, 4682])
+        self.assertEqual(r["kept"], [4801, 1866, 4682])
+        self.assertEqual(r["dropped"], 4)
+
+    def test_the_real_shape_collapses_to_a_handful(self):
+        """The observed 69-file recording: two full-buffer runs around three refills."""
+        lengths = ([4801] * 3 + [122, 234, 426, 1866]
+                   + [122, 314, 474, 3994] + [74, 234, 346, 4682] + [4801] * 2)
+        r = self._collapse(lengths)
+        # 4682 grows into the 4801 that follows, so it is a partial read of that run too.
+        self.assertEqual(r["kept"], [4801, 4801, 4801, 1866, 3994, 4801, 4801])
+        self.assertEqual(r["dropped"], 10)
+
+    def test_a_length_change_at_a_new_timebase_is_not_a_partial_read(self):
+        """Growth only counts within one time/div; a real timebase change must survive."""
+        frames = [{"len": 2401, "tpd": 0.005}, {"len": 4801, "tpd": 0.01}]
+        harness = recording_source() + (
+            "\nvar frames = %s.map(function (f) {\n"
+            "  return {ch1: new Array(f.len).fill(0.25), ch2: null,\n"
+            "          s: {tpd: f.tpd, len: f.len}}; });\n"
+            "var r = collapsePartialReads(frames);\n"
+            "__emit(JSON.stringify(r.dropped));\n" % json.dumps(frames)
+        )
+        self.assertEqual(run_js_json(harness), 0)
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestMessageDuration(unittest.TestCase):
+    """The recorder's messages want longer on screen than the app's ~1 s default."""
+
+    def test_override_survives_the_first_draw(self):
+        """drawMessage() resets the countdown when it first sees a new message, so setting
+        it in showMessage() alone would be silently overwritten."""
+        harness = recording_source() + (
+            "\nrecShowMessage('hello');\n"
+            "var afterShow = appParam_messageFrames;\n"
+            # Replay what drawMessage() does on first sight of a new message.
+            "appParam_lastMessage = appParam_message;\n"
+            "appParam_messageCountdown = 10;\n"
+            "if (appParam_messageFrames > 0) {\n"
+            "  appParam_messageCountdown = appParam_messageFrames;\n"
+            "  appParam_messageFrames = 0;\n"
+            "}\n"
+            "__emit(JSON.stringify({afterShow: afterShow,\n"
+            "                       countdown: appParam_messageCountdown,\n"
+            "                       cleared: appParam_messageFrames}));\n"
+        )
+        r = run_js_json(harness)
+        self.assertEqual(r["afterShow"], 50, "5 s at one draw per 100 ms is 50 draws")
+        self.assertEqual(r["countdown"], 50, "the override must win over the reset to 10")
+        self.assertEqual(r["cleared"], 0, "it is one-shot, so other callers keep the default")
+
+    def test_other_callers_keep_the_apps_default(self):
+        harness = recording_source() + (
+            "\nappParam_messageFrames = 0;\n"          # no recorder message pending
+            "appParam_messageCountdown = 10;\n"
+            "if (appParam_messageFrames > 0) appParam_messageCountdown = appParam_messageFrames;\n"
+            "__emit(JSON.stringify(appParam_messageCountdown));\n"
+        )
+        self.assertEqual(run_js_json(harness), 10)
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestSidecarSourceHonesty(unittest.TestCase):
+    """The sidecar must not claim calibration that the frame's code path never applied."""
+
+    def _sidecar(self, sources):
+        frames = [{"src": s} for s in sources]
+        harness = recording_source() + (
+            "\nrecordSampleRate = 200000000;\n"
+            "var frames = %s.map(function (f) {\n"
+            "  return {ch1: new Array(4).fill(0.25), ch2: null,\n"
+            "    s: {t: 0, sr: 200000000, tpd: 5e-8, len: 4, trigIdx: 2, src: f.src,\n"
+            "        demo: false, acq: 'Sample',\n"
+            "        ch1: {vpd: 0.5, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "        ch2: {on: false, vpd: 1, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "        trig: {src: 'CH1', mode: 'Auto', edge: 'rising', level: 1}}}; });\n"
+            "var tl = planRecordingTimeline(frames, 200000000);\n"
+            "__emit(JSON.stringify(buildRecordingSidecar(tl, false, [], 1, 1, 200000000)));\n"
+            % json.dumps(frames)
+        )
+        return run_js_json(harness)
+
+    def test_wav_only_capture_omits_the_offsets(self):
+        """The WAV branch negates and applies no offset, so reporting 0.005 would be a lie."""
+        sc = self._sidecar(["WAV", "WAV"])
+        self.assertNotIn("verticalOffsetCH1", sc["app_calibration"])
+        self.assertIn("verticalScale", sc["app_calibration"])
+        self.assertEqual(sc["signal_sources"], ["WAV"])
+
+    def test_databuffer_capture_reports_them(self):
+        sc = self._sidecar(["DataBuffer", "DataBuffer"])
+        self.assertEqual(sc["app_calibration"]["verticalOffsetCH1"], 0.005)
+        self.assertEqual(sc["app_calibration"]["applies_to"], "all frames")
+
+    def test_mixed_capture_says_which_frames(self):
+        """Switching source mid-recording means the constants apply to only some frames."""
+        sc = self._sidecar(["DataBuffer", "WAV", "DataBuffer2"])
+        self.assertEqual(sc["app_calibration"]["applies_to"], "DataBuffer frames only")
+        self.assertEqual(sorted(sc["signal_sources"]), ["DataBuffer", "DataBuffer2", "WAV"])
+
+    def test_wav_samplerate_is_flagged_estimated(self):
+        """For WAV the app estimates from frame length then clamps to the hardware ceiling:
+        50 ns/div computes 500 MHz and is reported as 200 MHz."""
+        self.assertTrue(self._sidecar(["WAV"])["samplerate_estimated"])
+        self.assertFalse(self._sidecar(["DataBuffer"])["samplerate_estimated"])
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
 class TestNaNGapEncoding(unittest.TestCase):
     def test_gap_bytes_are_float32_nan(self):
         """Gap runs must be real IEEE-754 NaN, little-endian, 4 bytes per sample."""

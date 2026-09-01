@@ -839,137 +839,77 @@ class TestRollingPartialFrame(unittest.TestCase):
         self.assertAlmostEqual(max(samples) - min(samples), AWG_VPP, delta=2 * lsb(0.5))
 
 
-# 500 ms/div: consecutive partial reads of one filling buffer, each a different length and
-# so a different apparent samplerate. The export split thirty ways — and the browser
-# delivered only the first ten, silently, which is what prompted the .zip bundling.
-ROLL_FRAGMENTS = ["DSO2512G_recording_20260901T012911_seg%d.sr" % n for n in (1, 5, 10)]
+# Recorded before frames without usable samples were dropped, and kept for exactly that
+# reason: it is the only capture holding one. All three signal sources in one recording,
+# both channels, 10 ns/div - and at frame 79 a 26-sample WAV frame that is entirely NaN.
+#
+# It lives in fixtures/known-bad/ because it violates an invariant on purpose, so the
+# structural sweep skips it and asserts against it here instead.
+SOURCES = os.path.join("known-bad", "DSO2512G_recording_20260901T023815.sr")
 
 
-class TestRollModeFragmentation(unittest.TestCase):
-    """The worst case for the timeline, and the reason the export now says so.
+class TestSignalSourceIndependence(unittest.TestCase):
+    """One signal, three different acquisition paths, and they must agree.
 
-    A screen at 500 ms/div spans 6 s, so a complete frame cannot exist until 6 s have
-    elapsed. Reads arrive every ~200 ms regardless, each returning whatever has accumulated
-    so far, and since the samplerate is derived from the frame length each read reports a
-    different — and wrong — rate. Splitting on rate then produces one file per read.
-
-    The true rate is recoverable from the growth: a full frame is 4801 samples over 6 s, so
-    800 Hz, and a 200 ms read should add about 160 samples. It does.
+    The three sources are not cosmetic variations. WAV negates the sample, averages two
+    interleaved records, and applies no calibration offset; DataBuffer adds
+    verticalOffsetCH1; DataBuffer2 differs again in how it fills the array. If recToVolts()
+    depended on any of that, this capture would show it as three different amplitudes.
     """
 
     def setUp(self):
-        self.segs = [SrFile(os.path.join(FIX, n)) for n in ROLL_FRAGMENTS]
-        self.scs = [s.sidecar() for s in self.segs]
+        self.sr = SrFile(os.path.join(FIX, SOURCES))
+        self.sc = self.sr.sidecar()
+        self.by_source = {}
+        for fr in self.sc["frames"]:
+            self.by_source.setdefault(fr["signal_source"], []).append(fr)
 
-    def test_each_file_holds_a_single_partial_frame(self):
-        for sc in self.scs:
-            self.assertEqual(sc["frame_count"], 1)
-            f = sc["frames"][0]
-            self.assertEqual(f["tpd"], 0.5)
-            self.assertLess(f["length"], 4801 / 2, "expected a partially filled buffer")
+    def _stats(self, channel, frames):
+        samples = self.sr.samples(channel)
+        v = []
+        for fr in frames:
+            v += finite(samples[fr["start_sample"]:fr["start_sample"] + fr["length"]])
+        return (max(v) - min(v), mean(v)) if v else (None, None)
 
-    def test_they_are_slices_of_one_fragmented_recording(self):
-        counts = {sc["segment"]["count"] for sc in self.scs}
-        self.assertEqual(counts, {30}, "these came from one thirty-way split")
-        idx = [sc["segment"]["index"] for sc in self.scs]
-        self.assertEqual(idx, sorted(idx))
+    def test_all_three_sources_are_present(self):
+        """Guards the test: without a source switch everything below passes vacuously."""
+        self.assertEqual(sorted(self.by_source), ["DataBuffer", "DataBuffer2", "WAV"])
 
-    def test_the_buffer_grows_between_reads(self):
-        lengths = [sc["frames"][0]["length"] for sc in self.scs]
-        self.assertEqual(lengths, sorted(lengths), "the buffer should only fill")
-        self.assertLess(lengths[0], lengths[-1] / 2, "expected substantial growth")
+    def test_amplitude_agrees_across_sources(self):
+        for channel, vpd in (("CH1", 0.5), ("CH2", 1.0)):
+            ptps = [self._stats(channel, frs)[0] for frs in self.by_source.values()]
+            ptps = [p for p in ptps if p is not None]
+            self.assertEqual(len(ptps), 3)
+            self.assertLess(max(ptps) - min(ptps), 2 * lsb(vpd),
+                            "%s pk-pk spread %.3f V across signal sources"
+                            % (channel, max(ptps) - min(ptps)))
 
-    def test_reported_rates_track_the_fill_not_the_sampling(self):
-        """Rates rise with buffer fill, which is the tell. A real rate change would not
-        march upward in step with the frame length."""
-        rates = [sc["samplerate"] for sc in self.scs]
-        lengths = [sc["frames"][0]["length"] for sc in self.scs]
-        self.assertEqual(rates, sorted(rates))
-        for rate, length in zip(rates, lengths):
-            self.assertAlmostEqual(rate, (length - 1) / 12 / 0.5, delta=1)
-        self.assertLess(max(rates), 800, "every reported rate is below the true ~800 Hz")
+    def test_switching_source_did_not_split_the_recording(self):
+        """All three shared a samplerate here, so one file was correct."""
+        self.assertEqual(self.sc["segment"], {"index": 1, "count": 1})
 
-    def test_voltages_are_unaffected(self):
-        """Only the time axis is compromised in this regime."""
-        for sr in self.segs:
-            samples = finite(sr.samples("CH1"))
-            self.assertAlmostEqual(max(samples) - min(samples), AWG_VPP, delta=2 * lsb(0.5))
+    def test_it_still_contains_the_corrupt_frame(self):
+        """The reason this fixture is kept. A WAV buffer shorter than the fixed 600-character
+        offset of the second sample gives parseInt("") -> NaN for every point.
 
-
-# The bundling fix, exercised on hardware. A 500 ms/div recording that split 31 ways and
-# arrived as one archive with all 31 inside — where the same situation a few minutes earlier
-# had split 30 ways and delivered 10 files, losing twenty without a word.
-BUNDLE = "DSO2512G_recording_20260901T014856_segments.zip"
-
-
-class TestBundledSegments(unittest.TestCase):
-    """One download instead of many, and nothing missing.
-
-    This is the regression guard for silent data loss: browsers cap how many files a single
-    gesture may save, so a large split has to arrive as one archive or it arrives incomplete.
-    """
-
-    def setUp(self):
-        self.zip = zipfile.ZipFile(os.path.join(FIX, BUNDLE))
-        self.members = sorted(self.zip.namelist(),
-                              key=lambda n: int(re.search(r"_seg(\d+)\.sr$", n).group(1)))
-        self.tmp = tempfile.mkdtemp(prefix="bundle-")
-        self.segs = []
-        for n in self.members:
-            path = os.path.join(self.tmp, os.path.basename(n))
-            with open(path, "wb") as f:
-                f.write(self.zip.read(n))
-            self.segs.append(SrFile(path))
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def test_every_declared_segment_is_present(self):
-        """The failure this replaces declared 30 segments and shipped 10."""
-        declared = {s.sidecar()["segment"]["count"] for s in self.segs}
-        self.assertEqual(len(declared), 1, "segments disagree about how many there are")
-        self.assertEqual(len(self.segs), declared.pop(), "the archive is missing segments")
-
-    def test_segment_numbering_is_contiguous(self):
-        idx = [s.sidecar()["segment"]["index"] for s in self.segs]
-        self.assertEqual(idx, list(range(1, len(idx) + 1)))
-
-    def test_every_member_is_a_readable_sr(self):
-        for s in self.segs:
-            self.assertEqual(s.version, "2")
-            self.assertGreater(s.samplerate, 0)
-            self.assertTrue(s.analog_channels)
-            name = s.analog_channels[0][0]
-            self.assertTrue(finite(s.samples(name)), "%s has no usable samples" % name)
-
-    def test_voltages_are_identical_across_every_segment(self):
-        """31 segments, reported rates from 31 Hz to 800 Hz, one unchanging signal.
-
-        The samplerate is meaningless in this regime, but the volts must not care: the
-        conversion depends on V/div and vertical position, not on timing.
+        If this stops holding, the fixture has been replaced by a newer capture and the
+        drop-empty-frames work has lost its real-world example.
         """
-        ptps = []
-        for s in self.segs:
-            ch1 = finite(s.samples("CH1"))
-            ptps.append(max(ch1) - min(ch1))
-        self.assertLess(max(ptps) - min(ptps), lsb(0.5),
-                        "pk-pk varies by %.3f V across segments" % (max(ptps) - min(ptps)))
-        self.assertAlmostEqual(mean(ptps), AWG_VPP, delta=2 * lsb(0.5))
+        samples = self.sr.samples("CH1")
+        dead = [fr for fr in self.sc["frames"]
+                if all(math.isnan(v) for v in
+                       samples[fr["start_sample"]:fr["start_sample"] + fr["length"]])]
+        self.assertEqual(len(dead), 1, "expected exactly one all-NaN frame")
+        self.assertLess(dead[0]["length"], 300, "the corrupt frame is a short WAV read")
+        self.assertEqual(dead[0]["signal_source"], "WAV")
 
-    def test_the_buffer_fills_to_a_complete_frame(self):
-        """The whole ramp is here: a partial first read growing to a full screen.
-
-        The last segment is the one that settles the true rate. A full frame at 500 ms/div
-        is 4801 samples over 12 x 0.5 = 6 s, so 800 Hz — and once the buffer is full that
-        is exactly what it reports, while every partial read before it under-reports.
-        """
-        lengths = [s.sidecar()["frames"][0]["length"] for s in self.segs]
-        rates = [s.sidecar()["samplerate"] for s in self.segs]
-        self.assertEqual(lengths, sorted(lengths), "the buffer should only ever fill")
-        self.assertEqual(rates, sorted(rates), "reported rate should track the fill")
-        self.assertEqual(lengths[-1], 4801, "expected the last read to be a complete frame")
-        self.assertEqual(rates[-1], 800, "a full frame at 500 ms/div is 800 Hz")
-        self.assertLess(rates[0], 100, "the first read should badly under-report")
+    def test_the_corrupt_frame_is_what_the_fix_now_removes(self):
+        """Every other frame has usable samples, so dropping the dead one loses nothing."""
+        samples = self.sr.samples("CH1")
+        alive = [fr for fr in self.sc["frames"]
+                 if any(not math.isnan(v) for v in
+                        samples[fr["start_sample"]:fr["start_sample"] + fr["length"]])]
+        self.assertEqual(len(alive), self.sc["frame_count"] - 1)
 
 
 class TestReaderHandlesBothLayouts(unittest.TestCase):

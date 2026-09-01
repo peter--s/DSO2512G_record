@@ -34,7 +34,14 @@ self‑contained `app_clean.html` (or to its extracted `app_clean_extracted.js` 
   There is no unit field in the `.sr` format to say otherwise — libsigrok's session reader
   hard‑codes `SR_MQ_VOLTAGE` / `SR_UNIT_VOLT`, so these floats *are* volts to anything that
   opens them. Both terms are taken **per frame**, so adjusting the scope mid‑recording does
-  not corrupt the frames that follow.
+  not corrupt the frames that follow, and the result is the same across all three signal
+  sources even though `WAV`, `DataBuffer` and `DataBuffer2` reach the samples by different
+  routes.
+- **Frames with no usable samples are dropped.** Switching the signal source mid‑recording
+  can yield one: the `WAV` path reads a second sample per point at a fixed offset, so a
+  buffer shorter than that offset produces `NaN` for every point. Since `NaN` means "no data
+  here" in the export, keeping such a frame would make it indistinguishable from dead time.
+  The count is logged.
 - **Channels:** CH1 always; CH2 whenever any captured frame has CH2 samples (decided at
   SAVE, so enabling CH2 part‑way through a recording keeps it).
 - **One frame per real acquisition:** capture is gated by the app's existing new‑frame
@@ -64,6 +71,13 @@ probe factor, coupling and bandwidth limit, plus the trigger source, slope and l
 also records `samplerate_exact` (metadata rounds to whole Hz) and the app's
 `verticalOffsetCH1/CH2` calibration constants, which stay baked into every sample because
 they are what makes the export agree with the scope's own on‑screen readouts.
+
+Those constants are reported **only when the frames actually carried them**: the `WAV` path
+negates instead and applies no offset, so a WAV capture omits them rather than claiming
+something untrue, and a mixed capture says which frames they apply to. `signal_sources`
+lists the paths used, and `samplerate_estimated` marks a rate the app could only infer from
+the frame length and then clamp to the hardware ceiling — 50 ns/div computes 500 MHz and is
+reported as 200 MHz.
 
 ### Limitations
 - **Frame placement is accurate to about one acquisition interval.** The timestamp is when
@@ -99,7 +113,10 @@ they are what makes the export agree with the scope's own on‑screen readouts.
   read before then returns whatever has accumulated. The rate is derived from the frame
   length, so a partial read describes how full the buffer was rather than how fast it was
   sampled — a 42-sample read reports 17 Hz. Since each differing length is a differing
-  samplerate, such a recording also fragments into many single-frame files.
+  samplerate, such a recording also fragments into many single-frame files — so partial
+  re-reads of a still-filling acquisition are dropped, keeping the fullest of each growing
+  run. Their samples are contained in that fuller read, and the count is logged. One
+  observed recording went from 69 files to 4 this way.
 
   **Beyond 8 segments the export delivers one `.zip` instead of many downloads.** Browsers
   cap how many files a single user gesture may save and drop the rest without saying so — a
