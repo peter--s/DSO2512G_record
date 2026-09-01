@@ -48,10 +48,9 @@ self‑contained `app_clean.html` (or to its extracted `app_clean_extracted.js` 
   detector (`trackBufferChangeTime` → `appParam_bufferUpdated`), so duplicate render ticks
   and backup‑fallback redraws are not recorded. Samples are taken before filtering,
   averaging and interpolation, but after the demo‑mode override.
-- **Real elapsed time.** An oscilloscope does not produce a continuous sample stream: each
-  frame is a separate triggered acquisition. Frames are placed at their true wall‑clock
-  offsets and the dead time between them is filled with NaN, which PulseView shows as
-  absent data. The gaps are the frame boundaries, so there is no marker channel.
+- **Real elapsed time**, with the dead time between acquisitions left as NaN. The gaps are
+  the frame boundaries, so there is no marker channel — see *How time is represented* below
+  for why one is not needed.
 
 ### `.sr` file layout (sigrok v2, matches libsigrok `srzip`)
 ```
@@ -79,65 +78,86 @@ lists the paths used, and `samplerate_estimated` marks a rate the app could only
 the frame length and then clamp to the hardware ceiling — 50 ns/div computes 500 MHz and is
 reported as 200 MHz.
 
+### How time is represented
+
+An oscilloscope does not produce a continuous sample stream. Each frame is a separate
+triggered acquisition, with dead time in between, and `.sr` has no way to say so — its
+metadata is `samplerate`, `capturefile`, `total probes`, `total analog` and channel names,
+nothing more. The sigrok v3 format solves this properly, with a per-frame packet carrying
+*"the time during acquisition at which this frame began"*, but it is
+[explicitly unimplemented](https://sigrok.org/wiki/File_format:Sigrok/v3). So the timeline
+has to be built out of samples, and these are the rules used.
+
+**A frame's samplerate is `(length − 1) / (12 × time-per-div)`.** This is the app's own rule —
+everywhere it converts a sample index to a time it computes `totalTime = 12 × tpd` and
+divides by `n − 1`, and it draws by stretching the array across the grid. `appParam_sampleRate`
+is only the top-bar readout, and for `WAV` it is clamped to the hardware ceiling to keep that
+readout sane. Using it stretched WAV frames by 12.5×, because a `WAV` frame is the
+instrument's *rendered screen trace* — a fixed 300 points at any time/div, "already processed
+and interpolated" — while a `DataBuffer` frame at the same setting held 25 real samples. Both
+span 12 divisions, so both must be written at their own rate, in their own segment.
+
+For `WAV` the resulting figure counts **display points per second, not ADC samples**: it is
+what makes the frame span its true duration, and it can exceed what the instrument can
+sample. The sidecar flags this as `samplerate_is_display_points`, and each frame records
+`intended_samples`, the real acquisition length. Record from `DataBuffer` if you want samples
+rather than the scope's rendering of them.
+
+**Dead time between frames is NaN.** PulseView shows it as absent data, and a NaN run
+deflates about 1000:1, so it costs nothing on disk. Frames are placed at their true
+wall-clock offsets, taken from the arrival timestamp, which is accurate to roughly one
+acquisition interval.
+
+**A rolling acquisition is reassembled, not repeated.** At 200 ms/div and slower the scope
+keeps one acquisition running and the app re-reads it every ~200 ms, so consecutive frames
+are one stream seen through a sliding window — measured on hardware, frame N+1 equals frame N
+shifted by exactly the arrival interval, to a mean difference of 0.0000 V. The shift is
+predicted from the timestamps and then confirmed against the samples, and only a near-exact
+match is stitched. One test recording went from 13 frames of 31,213 mostly duplicate samples
+to 4,801 genuine ones on a correct timeline.
+
+**Over budget, each frame becomes its own file.** A `.sr` carries one uniform samplerate, so
+showing 1.5 s at 100 MSa/s costs 150 M samples even when 4,800 of them carry signal. The file
+stays small, but every consumer materialises the whole array. Past
+`recordMaxTimelineSamples` per channel the frames are written separately instead — a squashed
+timeline is *wrong*, whereas separate frames merely have *no* timeline, and each sidecar's
+`t_ms` still records where its frame belongs. The budget is about consumer memory, not file
+size; gap buffers are shared, so the browser's cost does not grow with the dead time.
+
+If that produces an unwieldy number of files, the recording is asking for more than the
+format can express: record at a slower time/div, or for less time.
+
 ### Limitations
 - **Frame placement is accurate to about one acquisition interval.** The timestamp is when
   the frame was *received*, not when it was triggered. The export reconstructs *when* frames
   happened; it is not a continuous record of the signal.
-- **At 200 ms/div and slower, frames overlap and the timeline collapses.** Up to 100 ms/div
-  a frame arrives every `12 × time/div` plus a fixed transfer overhead of roughly
-  100–350 ms, so there is always dead time to show. From 200 ms/div the scope rolls —
-  it streams a continuously updating buffer instead of waiting for a full acquisition — so
-  frames keep arriving every ~200 ms while each still shows 12 × time/div of *history*.
-  Consecutive frames then overlap in signal content rather than being separate acquisitions.
-  They are laid back to back, which duplicates signal; the count is logged and recorded in
-  the sidecar as `clamped_frames`. Measured intervals:
+- **Frames arrive every `12 × time/div` plus 100–350 ms of transfer overhead.** Measured:
 
   | time/div | frame span | interval | acquired |
   |---|---|---|---|
   | 10 ns – 500 ns | ≤ 6 µs | ~100 ms | ~0% |
-  | 1 µs – 500 µs | ≤ 6 ms | ~200 ms | — |
   | 1 ms | 12 ms | 200 ms | 7% |
   | 5 ms | 60 ms | 200–300 ms | 28% |
-  | 10 ms | 120 ms | ~400 ms | — |
-  | 20 ms | 240 ms | ~500 ms | — |
   | 50 ms | 600 ms | 725 ms | 84% |
   | 100 ms | 1200 ms | 1400 ms | 88% |
-  | **200 ms – 5 s** | **2.4–60 s** | **~208 ms (rolling)** | **100%, overlapping** |
-  | 10 s | 120 s | ~400 ms (rolling) | overlapping |
+  | 200 ms – 5 s | 2.4–60 s | ~200 ms (rolling) | reassembled |
 
-  Values without a measured "acquired" figure are read from the app's frame-interval
-  counter; the rest are computed from recorded captures.
-
-  In the rolling regime the **reported samplerate is also unreliable**. A screen at
-  200 ms/div spans 2.4 s, so a complete frame cannot exist until 2.4 s have passed, and a
-  read before then returns whatever has accumulated. The rate is derived from the frame
-  length, so a partial read describes how full the buffer was rather than how fast it was
-  sampled — a 42-sample read reports 17 Hz. Since each differing length is a differing
-  samplerate, such a recording also fragments into many single-frame files — so partial
-  re-reads of a still-filling acquisition are dropped, keeping the fullest of each growing
-  run. Their samples are contained in that fuller read, and the count is logged. One
-  observed recording went from 69 files to 4 this way.
-
-  **Beyond 8 segments the export delivers one `.zip` instead of many downloads.** Browsers
-  cap how many files a single user gesture may save and drop the rest without saying so — a
-  thirty-way split was observed delivering ten files and losing twenty silently. The `.sr`
-  files inside open normally once extracted.
-- **Very long or very fast recordings drop the gaps.** Gap filling is budgeted on
-  uncompressed samples; beyond the budget the frames are concatenated, the sidecar reports
-  `"mode": "concatenated"`, and the app says so on screen.
-- **`.sr` carries a single samplerate**, so a rate change mid‑recording splits the export
-  into one `…_seg<k>.sr` per run — `srzip` cannot store segments and one file cannot
-  describe two rates correctly. The rate is derived from the acquired frame length
-  (`(length − 1) / 12 / time-per-div`), so the **time/div is not the only thing that moves
-  it**: switching CH2 off doubles the frame length, because single-channel mode interleaves
-  both ADCs into CH1 (measured: 2401 samples at 200 kHz becomes 4801 at 400 kHz, at a fixed
-  1 ms/div), and demo mode substitutes a generated array of its own size. Both split a
-  recording with the time/div untouched. Returning to an earlier
-  rate starts a further segment rather than rejoining the first, since the frames in between
-  belong elsewhere on the timeline.
-- **Bit‑identical frames are deduplicated.** New frames are detected by comparing the raw
-  buffer, so a perfectly static signal with no noise can look like a gap that should not be
-  there.
+- **`.sr` carries a single samplerate**, so a rate change mid-recording splits the export into
+  one `…_seg<k>.sr` per run. The rate follows the acquired frame length, so the time/div is
+  not the only thing that moves it: switching CH2 off doubles the length (single-channel mode
+  interleaves both ADCs into CH1 — measured, 2401 samples at 200 kHz becoming 4801 at
+  400 kHz), demo mode substitutes a generated array, and a source switch changes it too.
+  Returning to an earlier rate starts a further segment, since the frames in between belong
+  elsewhere on the timeline.
+- **Beyond 8 files the export delivers one `.zip`.** Browsers cap how many files a single
+  gesture may save and drop the rest silently — a thirty-way split was observed delivering ten
+  files and losing twenty.
+- **Frames with no usable samples are dropped.** Switching the signal source can yield one:
+  the `WAV` path reads a second sample per point at a fixed offset, so a buffer shorter than
+  that offset produces `NaN` for every point. Since `NaN` means "no data here", keeping such a
+  frame would make it indistinguishable from dead time. The count is logged.
+- **Bit-identical frames are deduplicated** by the app's own new-frame detector, so a
+  perfectly static noiseless signal can look like a gap that should not be there.
 
 > **Changed in this version:** samples are now volts rather than normalised screen positions,
 > and dropping the FRAME channel moved CH1/CH2 from `analog-1-2`/`analog-1-3` down to

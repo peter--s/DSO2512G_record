@@ -122,12 +122,17 @@ class TestTimelinePlanning(unittest.TestCase):
         self.assertEqual(r["plan"][0]["start"], 0)
         self.assertEqual(r["plan"][0]["gap"], 0)
 
-    def test_size_guard_drops_gaps(self):
-        """Beyond the budget the gaps are abandoned rather than materialising GBs of NaN."""
-        r = self._plan([0.0, 1000000.0], length=100)  # a 1000 s gap at 20 kSa/s
-        self.assertEqual(r["mode"], "concatenated")
-        self.assertEqual([p["gap"] for p in r["plan"]], [0, 0])
-        self.assertEqual(r["total"], 200)
+    def test_an_oversize_timeline_is_flagged_not_squashed(self):
+        """Beyond the budget the plan is reported as oversize and the caller writes one file
+        per frame. The gaps are left intact rather than being silently removed, because a
+        squashed timeline is wrong where a missing one is merely absent."""
+        r = self._plan([0.0, 100000000.0], length=100)   # an absurd gap at 20 kSa/s
+        self.assertTrue(r["oversize"])
+        self.assertEqual(r["mode"], "realtime")
+        self.assertGreater(r["plan"][1]["gap"], 0, "gaps must not be quietly dropped")
+
+    def test_a_normal_recording_is_not_oversize(self):
+        self.assertFalse(self._plan([0.0, 500.0, 1000.0])["oversize"])
 
     def test_missing_timestamps_do_not_break_layout(self):
         """Frames recorded before the timestamp existed still lay out back to back."""
@@ -255,171 +260,157 @@ class TestSidecar(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
 class TestSamplerateSplitting(unittest.TestCase):
-    """A .sr holds one samplerate and srzip has no segments, so a time/div change
-    mid-recording has to become separate files rather than a misdescribed one."""
+    """A .sr holds one samplerate, so a rate change has to become separate files.
 
-    def _split(self, rates):
-        frames = [{"ch1": [0], "s": {"sr": r}} for r in rates]
+    The rate of a frame is the app's own rule, (length - 1) / (12 * time-per-div), so these
+    build frames by length rather than by asserting a rate.
+    """
+
+    @staticmethod
+    def _len_for(rate, tpd=0.005):
+        return int(round(rate * 12 * tpd)) + 1
+
+    def _split(self, rates, tpd=0.005):
+        lens = [self._len_for(r, tpd) for r in rates]
         harness = recording_source() + (
-            "\nvar runs = splitRecordingBySamplerate(%s);\n"
-            "__emit(JSON.stringify(runs.map(function (r) {"
-            " return {rate: r.sampleRate, n: r.frames.length}; })));\n" % json.dumps(frames)
+            "\nvar frames = %s.map(function (n) {\n"
+            "  return {ch1: new Array(n).fill(0.25), ch2: null,\n"
+            "          s: {t: 0, tpd: %s, len: n, src: 'DataBuffer'}}; });\n"
+            "var runs = splitRecordingBySamplerate(frames);\n"
+            "__emit(JSON.stringify(runs.map(function (r) {\n"
+            "  return {rate: Math.round(r.sampleRate), n: r.frames.length}; })));\n"
+            % (json.dumps(lens), tpd)
         )
         return run_js_json(harness)
 
     def test_constant_rate_stays_one_file(self):
-        self.assertEqual(self._split([20000] * 5), [{"rate": 20000, "n": 5}])
+        self.assertEqual(self._split([40000] * 5), [{"rate": 40000, "n": 5}])
 
     def test_rate_change_splits(self):
-        self.assertEqual(self._split([20000, 20000, 50000, 50000, 50000]),
-                         [{"rate": 20000, "n": 2}, {"rate": 50000, "n": 3}])
+        self.assertEqual(self._split([40000, 40000, 20000, 20000, 20000]),
+                         [{"rate": 40000, "n": 2}, {"rate": 20000, "n": 3}])
 
     def test_returning_to_an_earlier_rate_is_a_new_run(self):
-        """Runs are consecutive, not grouped: going back to 20 kHz starts a third file,
-        because the frames in between belong elsewhere on the timeline."""
-        self.assertEqual(self._split([20000, 50000, 20000]),
-                         [{"rate": 20000, "n": 1}, {"rate": 50000, "n": 1},
-                          {"rate": 20000, "n": 1}])
+        """Runs are consecutive, not grouped: going back starts a third file, because the
+        frames in between belong elsewhere on the timeline."""
+        self.assertEqual(self._split([40000, 20000, 40000]),
+                         [{"rate": 40000, "n": 1}, {"rate": 20000, "n": 1},
+                          {"rate": 40000, "n": 1}])
 
     def test_every_frame_is_kept(self):
-        rates = [20000, 20000, 40000, 20000, 80000, 80000]
+        rates = [40000, 40000, 20000, 40000, 10000, 10000]
         self.assertEqual(sum(r["n"] for r in self._split(rates)), len(rates))
 
-    def _export_n_segments(self, n, tpd=0.5):
-        """Drive the real exportRecordingSR() with n differing samplerates."""
-        harness = recording_source_with_zip() + (
-            "\nvar logged = [];\n"
-            "log = function (m) { logged.push(m); };\n"
-            "var shown = [];\n"
-            "showMessage = function (m) { shown.push(m); };\n"
-            "var downloads = [];\n"
-            "downloadRecordingBlob = function (blob, name) { downloads.push(name); };\n"
-            "recordedFrames = [];\n"
-            "for (var i = 0; i < %d; i++) {\n"
-            "  recordedFrames.push({ch1: new Array(4).fill(0.25), ch2: null,\n"
-            "    s: {t: i * 200, sr: 100 + i * 37, tpd: %s, len: 4, trigIdx: 2,\n"
-            "        src: 'DataBuffer2', demo: false, acq: 'Sample',\n"
-            "        ch1: {vpd: 0.5, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
-            "        ch2: {on: false, vpd: 1, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
-            "        trig: {src: 'CH1', mode: 'Auto', edge: 'rising', level: 1}}});\n"
-            "}\n"
-            "recordSampleRate = 100;\n"
-            "exportRecordingSR().then(function () {\n"
-            "  __emit(JSON.stringify({log: logged, shown: shown, downloads: downloads,\n"
-            "                         written: __written.map(function (e) { return e.name; })}));\n"
-            "});\n" % (n, tpd)
+    def test_wav_and_databuffer_do_not_share_a_rate(self):
+        """The bug this rule fixes. At 20 ns/div a WAV frame is a fixed 300 display points
+        and a DataBuffer frame is 25 real samples, both spanning 12 divisions. The app's
+        clamped readout called both 100 MHz, which stretched the WAV frames 12.5x."""
+        harness = recording_source() + (
+            "\nvar frames = [{ch1: new Array(300).fill(0.25), ch2: null,\n"
+            "                s: {t: 0, tpd: 2e-8, len: 300, src: 'WAV'}},\n"
+            "               {ch1: new Array(25).fill(0.25), ch2: null,\n"
+            "                s: {t: 0, tpd: 2e-8, len: 25, src: 'DataBuffer'}}];\n"
+            "var runs = splitRecordingBySamplerate(frames);\n"
+            "__emit(JSON.stringify(runs.map(function (r) { return Math.round(r.sampleRate); })));\n"
+        )
+        rates = run_js_json(harness)
+        self.assertEqual(len(rates), 2, "WAV and DataBuffer must not share a segment")
+        self.assertAlmostEqual(rates[1], 100000000, delta=1)     # 24 / 240 ns
+        self.assertGreater(rates[0], rates[1] * 10, "the WAV frame is far denser in points")
+
+    def test_a_frame_always_spans_twelve_divisions(self):
+        """The property the whole rule exists for: whatever the length, a frame occupies
+        exactly 12 x time/div once written at its own rate."""
+        harness = recording_source() + (
+            "\nvar out = [300, 25, 2401, 4801].map(function (n) {\n"
+            "  var r = recFrameSampleRate({tpd: 2e-8}, n);\n"
+            "  return (n - 1) / r; });\n"
+            "__emit(JSON.stringify(out));\n"
+        )
+        for span in run_js_json(harness):
+            self.assertAlmostEqual(span, 12 * 2e-8, places=12)
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestRollingStitch(unittest.TestCase):
+    """A rolling acquisition read repeatedly is one stream, not many frames.
+
+    Measured on hardware: at 200 ms/div frame N+1 is frame N shifted by exactly the arrival
+    interval, to a mean difference of 0.0000 V. Writing them separately duplicates most of
+    the samples onto a timeline that cannot hold them.
+    """
+
+    def _stitch(self, offsets, length=400, rate=1000, tpd=0.5, src="DataBuffer2", jitter=0):
+        """Windows onto one underlying ramp, at the given sample offsets."""
+        frames = [{"off": o, "t": o / rate * 1000 + (jitter if i else 0)}
+                  for i, o in enumerate(offsets)]
+        harness = recording_source() + (
+            "\nvar base = []; for (var i = 0; i < 20000; i++) base.push(Math.sin(i / 13));\n"
+            "var frames = %s.map(function (f) {\n"
+            "  return {ch1: base.slice(f.off, f.off + %d), ch2: null,\n"
+            "          s: {t: f.t, tpd: %s, len: %d, src: '%s'}}; });\n"
+            "var r = stitchRollingFrames(frames, %d);\n"
+            "__emit(JSON.stringify({lens: r.frames.map(function (f) { return f.ch1.length; }),\n"
+            "                       stitched: r.stitched, dropped: r.dropped,\n"
+            "                       ok: r.frames.length === 1 &&\n"
+            "                           r.frames[0].ch1.every(function (v, i) {\n"
+            "                             return Math.abs(v - base[i]) < 1e-9; })}));\n"
+            % (json.dumps(frames), length, tpd, length, src, rate)
         )
         return run_js_json(harness)
 
-    def test_a_large_split_becomes_one_archive(self):
-        """Thirty segments must not become thirty downloads.
+    def test_a_sliding_window_becomes_one_stream(self):
+        r = self._stitch([0, 200, 400, 600])
+        self.assertEqual(r["stitched"], 3)
+        self.assertEqual(r["lens"], [400 + 3 * 200])
+        self.assertTrue(r["ok"], "the stitched stream must equal the underlying signal")
 
-        A browser stops starting downloads well before thirty and does not report that it
-        did: a real thirty-way split delivered ten files and lost twenty silently. One
-        archive is one download, so nothing can go missing.
-        """
-        r = self._export_n_segments(30)
-        self.assertEqual(len(r["downloads"]), 1,
-                         "expected a single archive, got %d downloads" % len(r["downloads"]))
-        self.assertTrue(r["downloads"][0].endswith("_segments.zip"))
-        self.assertIn("bundling", " ".join(r["log"]).lower())
+    def test_the_result_contains_no_duplicated_samples(self):
+        """Four 400-sample reads sliding by 200 hold 1000 distinct samples, not 1600."""
+        r = self._stitch([0, 200, 400, 600])
+        self.assertEqual(r["lens"][0], 1000)
 
-    def test_the_archive_contains_every_segment(self):
-        """The point of bundling is that none are dropped, so count them."""
-        r = self._export_n_segments(30)
-        members = [n for n in r["written"] if n.endswith(".sr")]
-        self.assertEqual(len(members), 30, "archive holds %d of 30 segments" % len(members))
-        self.assertEqual(len(set(members)), 30, "segment filenames must be unique")
-        for i in (1, 15, 30):
-            self.assertTrue(any(("_seg%d.sr" % i) in n for n in members),
-                            "segment %d missing from the archive" % i)
+    def test_a_timestamp_that_is_slightly_off_still_aligns(self):
+        """The shift is confirmed against the samples, so jitter in the arrival time is
+        recovered rather than trusted."""
+        r = self._stitch([0, 200, 400], jitter=3.0)
+        self.assertEqual(r["stitched"], 2)
+        self.assertTrue(r["ok"])
 
-    def test_a_small_split_still_downloads_separately(self):
-        """Below the threshold the .sr files arrive directly, as before — bundling would
-        make the common two- or three-way split needlessly awkward to open."""
-        r = self._export_n_segments(3)
-        self.assertEqual(len(r["downloads"]), 3)
-        self.assertTrue(all(n.endswith(".sr") for n in r["downloads"]))
-        self.assertNotIn("bundling", " ".join(r["log"]).lower())
+    def test_unrelated_frames_are_left_alone(self):
+        """No overlap means no stitch: the frames must survive untouched."""
+        r = self._stitch([0, 4000, 8000])
+        self.assertEqual(r["stitched"], 0)
+        self.assertEqual(r["lens"], [400, 400, 400])
 
-    def test_many_single_frame_segments_are_called_out(self):
-        """A recording that fragments into many one-frame files is the slow-timebase
-        pathology, not someone turning the knob. The scope rolls, each read returns a
-        partially filled buffer, and every differing length reads back as a differing
-        samplerate — so ten downloads appear with implausible rates on them. Detect the
-        shape and explain it rather than handing that over silently.
-        """
-        frames = [{"ch1": [0], "s": {"sr": r}} for r in (50, 79, 98, 130, 159, 180)]
-        harness = recording_source_with_zip() + (
-            "\nvar logged = [];\n"
-            "log = function (m) { logged.push(m); };\n"
-            "var shown = [];\n"
-            "showMessage = function (m) { shown.push(m); };\n"
-            "recordedFrames = %s.map(function (f) {\n"
-            "  f.ch1 = new Array(4).fill(0.25); f.ch2 = null;\n"
-            "  f.s = {t: 0, sr: f.s.sr, tpd: 0.5, len: 4, trigIdx: 2, src: 'DataBuffer2',\n"
-            "         demo: false, acq: 'Sample',\n"
-            "         ch1: {vpd: 0.5, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
-            "         ch2: {on: false, vpd: 1, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
-            "         trig: {src: 'CH1', mode: 'Auto', edge: 'rising', level: 1}};\n"
-            "  return f; });\n"
-            "recordSampleRate = 50;\n"
-            "exportRecordingSR();\n"
-            "__emit(JSON.stringify({log: logged, shown: shown}));\n" % json.dumps(frames)
+    def test_a_still_filling_acquisition_keeps_only_the_fullest(self):
+        """Before the window starts sliding, a shorter frame is a prefix of the next."""
+        harness = recording_source() + (
+            "\nvar base = []; for (var i = 0; i < 5000; i++) base.push(Math.sin(i / 13));\n"
+            "var frames = [186, 506, 4801].map(function (n) {\n"
+            "  return {ch1: base.slice(0, n), ch2: null,\n"
+            "          s: {t: 0, tpd: 0.5, len: n, src: 'DataBuffer2'}}; });\n"
+            "var r = stitchRollingFrames(frames, 1000);\n"
+            "__emit(JSON.stringify({lens: r.frames.map(function (f) { return f.ch1.length; }),\n"
+            "                       dropped: r.dropped, stitched: r.stitched}));\n"
         )
         r = run_js_json(harness)
-        joined = " ".join(r["log"]).lower()
-        self.assertIn("single frame", joined)
-        self.assertIn("still filling", joined)
-        self.assertTrue(any("buffer fill" in m.lower() for m in r["shown"]),
-                        "the user should be told on screen, not only in the log")
+        self.assertEqual(r["lens"], [4801])
+        self.assertEqual(r["dropped"], 2)
 
-    def test_a_normal_split_is_not_flagged_as_the_slow_timebase_case(self):
-        """Six healthy multi-frame segments must not trigger the roll-mode note."""
-        harness = recording_source_with_zip() + (
-            "\nvar logged = [];\n"
-            "log = function (m) { logged.push(m); };\n"
-            "showMessage = function () {};\n"
-            "var mk = function (sr) { return {ch1: new Array(4).fill(0.25), ch2: null,\n"
-            "  s: {t: 0, sr: sr, tpd: 0.005, len: 4, trigIdx: 2, src: 'DataBuffer2',\n"
-            "      demo: false, acq: 'Sample',\n"
-            "      ch1: {vpd: 0.5, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
-            "      ch2: {on: false, vpd: 1, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
-            "      trig: {src: 'CH1', mode: 'Auto', edge: 'rising', level: 1}}}; };\n"
-            "recordedFrames = [mk(40000), mk(40000), mk(20000), mk(20000), mk(10000), mk(10000)];\n"
-            "recordSampleRate = 40000;\n"
-            "exportRecordingSR();\n"
-            "__emit(JSON.stringify(logged));\n"
+    def test_a_source_switch_is_never_stitched(self):
+        harness = recording_source() + (
+            "\nvar base = []; for (var i = 0; i < 5000; i++) base.push(Math.sin(i / 13));\n"
+            "var frames = [{ch1: base.slice(0, 400), ch2: null,\n"
+            "               s: {t: 0, tpd: 0.5, len: 400, src: 'DataBuffer'}},\n"
+            "              {ch1: base.slice(200, 600), ch2: null,\n"
+            "               s: {t: 200, tpd: 0.5, len: 400, src: 'WAV'}}];\n"
+            "var r = stitchRollingFrames(frames, 1000);\n"
+            "__emit(JSON.stringify({n: r.frames.length, stitched: r.stitched}));\n"
         )
-        joined = " ".join(run_js_json(harness)).lower()
-        self.assertIn("samplerate changed", joined)
-        self.assertNotIn("single frame", joined)
-
-    def test_split_warning_does_not_blame_the_timebase(self):
-        """The samplerate is derived from the acquired frame length, so the time/div is
-        only one of the things that moves it. Enabling CH2 halves the length, and demo
-        mode substitutes a generated array of its own size - both split a recording with
-        the time/div untouched, which is how this wording was found to be wrong.
-        """
-        harness = recording_source_with_zip() + (
-            "\nrecordSampleRate = 40000;\n"
-            "var frames = [{ch1: new Array(4).fill(0.25), ch2: null,\n"
-            "  s: {t: 0, sr: 20000, tpd: 0.005, len: 4, trigIdx: 2, src: 'DataBuffer2',\n"
-            "      demo: true, acq: 'Sample',\n"
-            "      ch1: {vpd: 0.5, vpos: -0.28, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
-            "      ch2: {on: false, vpd: 1, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
-            "      trig: {src: 'CH1', mode: 'Auto', edge: 'rising', level: 1.18}}}];\n"
-            "exportRecordingSegment(frames, 20000, 2, 2, 'STAMP');\n"
-            "var sc = JSON.parse(__written.filter(function (e) {"
-            "  return e.name === 'dso2512g-recording.json'; })[0].text);\n"
-            "__emit(JSON.stringify(sc.warnings));\n"
-        )
-        warnings = run_js_json(harness)
-        self.assertTrue(warnings)
-        text = " ".join(warnings).lower()
-        self.assertIn("samplerate changed", text)
-        self.assertIn("segment 2 of 2", text)
-        self.assertNotIn("the time/div changed", text)
+        r = run_js_json(harness)
+        self.assertEqual(r["n"], 2)
+        self.assertEqual(r["stitched"], 0)
 
 
 @unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
@@ -480,106 +471,6 @@ class TestUnusableFramesAreDropped(unittest.TestCase):
         self.assertEqual(len(r["downloads"]), 1, "the dead frame must not have split the export")
         self.assertIn("no usable samples", " ".join(r["log"]).lower(),
                       "dropping frames must be reported, not silent")
-
-
-@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
-class TestPartialReadCollapsing(unittest.TestCase):
-    """Roll-mode partial re-reads should not each become a file.
-
-    A still-filling acquisition is read repeatedly, so consecutive frames grow — and since
-    the samplerate is derived from the frame length, each apparent rate differs and each read
-    splits off. One recording produced 69 files, 67 of them single frames whose samples the
-    later, fuller reads already contained. Keep only the fullest of each growing run.
-    """
-
-    def _collapse(self, lengths, tpd=0.5):
-        frames = [{"len": n} for n in lengths]
-        harness = recording_source() + (
-            "\nvar frames = %s.map(function (f) {\n"
-            "  return {ch1: new Array(f.len).fill(0.25), ch2: null,\n"
-            "          s: {tpd: %s, len: f.len, src: 'DataBuffer2'}}; });\n"
-            "var r = collapsePartialReads(frames);\n"
-            "__emit(JSON.stringify({kept: r.frames.map(function (f) { return f.ch1.length; }),\n"
-            "                       dropped: r.dropped}));\n" % (json.dumps(frames), tpd)
-        )
-        return run_js_json(harness)
-
-    def test_a_growing_run_keeps_only_its_fullest(self):
-        r = self._collapse([186, 314, 506, 4801])
-        self.assertEqual(r["kept"], [4801])
-        self.assertEqual(r["dropped"], 3)
-
-    def test_a_steady_acquisition_is_untouched(self):
-        """Normal recording holds its frame length, so nothing may be dropped."""
-        r = self._collapse([2401] * 6, tpd=0.005)
-        self.assertEqual(r["kept"], [2401] * 6)
-        self.assertEqual(r["dropped"], 0)
-
-    def test_each_fill_cycle_keeps_its_own_last(self):
-        """The buffer restarts, so a drop in length ends a run and begins another."""
-        r = self._collapse([186, 506, 4801, 122, 1866, 74, 4682])
-        self.assertEqual(r["kept"], [4801, 1866, 4682])
-        self.assertEqual(r["dropped"], 4)
-
-    def test_the_real_shape_collapses_to_a_handful(self):
-        """The observed 69-file recording: two full-buffer runs around three refills."""
-        lengths = ([4801] * 3 + [122, 234, 426, 1866]
-                   + [122, 314, 474, 3994] + [74, 234, 346, 4682] + [4801] * 2)
-        r = self._collapse(lengths)
-        # 4682 grows into the 4801 that follows, so it is a partial read of that run too.
-        self.assertEqual(r["kept"], [4801, 4801, 4801, 1866, 3994, 4801, 4801])
-        self.assertEqual(r["dropped"], 10)
-
-    def test_a_source_switch_is_not_a_partial_read(self):
-        """Switching signal source changes the frame length at the same time/div.
-
-        A 13-sample DataBuffer frame followed by a 300-sample WAV one is two separate
-        acquisitions, not one that grew, so neither may be discarded. Without the source
-        check the shorter of the pair was silently dropped — found on a real recording that
-        switched sources six times.
-        """
-        frames = [{"len": 13, "src": "DataBuffer"},
-                  {"len": 300, "src": "WAV"},
-                  {"len": 300, "src": "WAV"},
-                  {"len": 13, "src": "DataBuffer2"}]
-        harness = recording_source() + (
-            "\nvar frames = %s.map(function (f) {\n"
-            "  return {ch1: new Array(f.len).fill(0.25), ch2: null,\n"
-            "          s: {tpd: 1e-8, len: f.len, src: f.src}}; });\n"
-            "var r = collapsePartialReads(frames);\n"
-            "__emit(JSON.stringify({kept: r.frames.map(function (f) { return f.ch1.length; }),\n"
-            "                       dropped: r.dropped}));\n" % json.dumps(frames)
-        )
-        r = run_js_json(harness)
-        self.assertEqual(r["dropped"], 0, "no frame may be lost to a source switch")
-        self.assertEqual(r["kept"], [13, 300, 300, 13])
-
-    def test_growth_within_one_source_is_still_collapsed(self):
-        """The real case must keep working: one source, one time/div, a filling buffer."""
-        frames = [{"len": n, "src": "DataBuffer2"} for n in (186, 314, 506, 4801)]
-        harness = recording_source() + (
-            "\nvar frames = %s.map(function (f) {\n"
-            "  return {ch1: new Array(f.len).fill(0.25), ch2: null,\n"
-            "          s: {tpd: 0.5, len: f.len, src: f.src}}; });\n"
-            "var r = collapsePartialReads(frames);\n"
-            "__emit(JSON.stringify({kept: r.frames.map(function (f) { return f.ch1.length; }),\n"
-            "                       dropped: r.dropped}));\n" % json.dumps(frames)
-        )
-        r = run_js_json(harness)
-        self.assertEqual(r["kept"], [4801])
-        self.assertEqual(r["dropped"], 3)
-
-    def test_a_length_change_at_a_new_timebase_is_not_a_partial_read(self):
-        """Growth only counts within one time/div; a real timebase change must survive."""
-        frames = [{"len": 2401, "tpd": 0.005}, {"len": 4801, "tpd": 0.01}]
-        harness = recording_source() + (
-            "\nvar frames = %s.map(function (f) {\n"
-            "  return {ch1: new Array(f.len).fill(0.25), ch2: null,\n"
-            "          s: {tpd: f.tpd, len: f.len}}; });\n"
-            "var r = collapsePartialReads(frames);\n"
-            "__emit(JSON.stringify(r.dropped));\n" % json.dumps(frames)
-        )
-        self.assertEqual(run_js_json(harness), 0)
 
 
 @unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
