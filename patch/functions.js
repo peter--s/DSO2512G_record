@@ -62,7 +62,7 @@ function recShowMessage(text) {
 // the rest of the app uses, so a frame always occupies exactly its 12 divisions.
 function recFrameSampleRate(s, length) {
     const tpd = (s && isFinite(s.tpd) && s.tpd > 0) ? s.tpd : 1;
-    return Math.max(1, (Math.max(2, length) - 1) / (12 * tpd));
+    return (Math.max(2, length) - 1) / (12 * tpd);
 }
 
 // Captures the acquisition settings in force for the frame currently being snapshotted.
@@ -398,6 +398,33 @@ function stitchRollingFrames(frames, sampleRate) {
     return { frames: out, stitched: stitched, dropped: dropped };
 }
 
+// Groups consecutive frames by acquisition setting rather than by samplerate.
+//
+// Stitching has to happen before the rate split, not after: partial reads of a filling
+// buffer differ in length and therefore in rate, so splitting first puts every one of them
+// in a run of its own and the stitcher never sees a pair to join.
+function groupByAcquisition(frames) {
+    const runs = [];
+    for (let i = 0; i < frames.length; i++) {
+        const s = frames[i].s;
+        const key = s ? (s.src + "@" + s.tpd) : "?";
+        if (!runs.length || runs[runs.length - 1].key !== key) runs.push({ key: key, frames: [] });
+        runs[runs.length - 1].frames.push(frames[i]);
+    }
+    return runs;
+}
+
+// The rate of the underlying acquisition for a group, taken from its fullest read - during
+// the filling phase a frame is short only because the buffer has not caught up yet.
+function recGroupSampleRate(frames) {
+    let longest = 0, s = null;
+    for (let i = 0; i < frames.length; i++) {
+        const n = (frames[i].ch1 || []).length;
+        if (n > longest) { longest = n; s = frames[i].s; }
+    }
+    return recFrameSampleRate(s, longest);
+}
+
 // Splits the captured frames into runs of constant samplerate.
 //
 // A .sr carries exactly one samplerate, and srzip has no notion of segments, so a recording
@@ -485,6 +512,13 @@ function buildRecordingSegment(frames, sampleRate, segIndex, segCount, stamp) {
         warnings.push(timeline.clamped + " frame(s) overlapped in wall-clock time and were placed back to back.");
         log("NOTE: " + warnings[warnings.length - 1] + " A frame spans 12 x time/div of signal, " +
             "which at slow timebases can exceed the interval between acquisitions.");
+    }
+    if (sampleRate < 1) {
+        warnings.push("The frames here work out below 1 Sa/s (" + sampleRate.toFixed(4) + "), " +
+            "which a .sr cannot express - its samplerate is a whole number of Hz - so the file " +
+            "says 1 Hz and its timeline is stretched by that much. A very slow time/div read " +
+            "before the acquisition filled produces this.");
+        log("WARNING: " + warnings[warnings.length - 1]);
     }
     if (segCount > 1 && frames.length === 1) {
         warnings.push("This file holds a single frame. The recording needed more samples than " +
@@ -574,11 +608,11 @@ function exportRecordingSR() {
             "signal source mid-recording can yield one of these.");
     }
 
-    // Stitch per samplerate run, since the shift is predicted from that run's rate.
+    // Stitch per acquisition setting, before any rate split - see groupByAcquisition().
     let frames = [];
     let stitched = 0, prefixes = 0;
-    splitRecordingBySamplerate(recordedFrames).forEach((run) => {
-        const r = stitchRollingFrames(run.frames, run.sampleRate);
+    groupByAcquisition(recordedFrames).forEach((run) => {
+        const r = stitchRollingFrames(run.frames, recGroupSampleRate(run.frames));
         stitched += r.stitched; prefixes += r.dropped;
         frames = frames.concat(r.frames);
     });

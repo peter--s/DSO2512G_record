@@ -665,3 +665,86 @@ class TestExportEmitsAWellFormedArchive(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestStitchBeforeSplit(unittest.TestCase):
+    """Stitching must happen before the samplerate split, not after.
+
+    Partial reads of a filling buffer differ in length and therefore in rate. Splitting
+    first put every one of them in a run of its own, so the stitcher never saw a pair and
+    was inert exactly where it was designed to work — a real recording produced 259
+    single-frame files because of it.
+    """
+
+    # The fill ramps observed at 0.5 s/div and 1 s/div in DSO2512G_recording_20260901T101757.
+    RAMP_HALF = [75, 155, 219, 315, 395, 459, 555, 635, 699, 795, 875, 939, 1035, 1115,
+                 1179, 1275, 1355, 1419, 1515, 1595, 1659, 1755, 1835, 1899, 1995, 2075,
+                 2139, 2235, 2315, 2379, 2401, 3817]
+    RAMP_ONE = [35, 67, 115, 155, 187, 235, 275, 307, 355, 395, 427, 475, 515, 547, 595,
+                635, 667, 715, 755, 787, 835, 875, 2401]
+
+    def _run(self):
+        harness = recording_source() + (
+            "\nvar base = []; for (var i = 0; i < 8000; i++) base.push(Math.sin(i / 41));\n"
+            "function build(lens, tpd, t0) {\n"
+            "  return lens.map(function (n, i) {\n"
+            "    return {ch1: base.slice(0, n), ch2: null,\n"
+            "            s: {t: t0 + i * 200, tpd: tpd, len: n, src: 'DataBuffer2'}}; });\n"
+            "}\n"
+            "var frames = build(%s, 0.5, 0).concat(build(%s, 1, 20000));\n"
+            "var out = [], dropped = 0;\n"
+            "groupByAcquisition(frames).forEach(function (g) {\n"
+            "  var r = stitchRollingFrames(g.frames, recGroupSampleRate(g.frames));\n"
+            "  dropped += r.dropped; out = out.concat(r.frames);\n"
+            "});\n"
+            "__emit(JSON.stringify({inn: frames.length, out: out.length, dropped: dropped,\n"
+            "  files: splitRecordingBySamplerate(out).length,\n"
+            "  lens: out.map(function (f) { return f.ch1.length; })}));\n"
+            % (json.dumps(self.RAMP_HALF), json.dumps(self.RAMP_ONE))
+        )
+        return run_js_json(harness)
+
+    def test_two_fill_ramps_become_two_files(self):
+        r = self._run()
+        self.assertEqual(r["inn"], 55)
+        self.assertEqual(r["files"], 2, "each fill ramp is one acquisition, so one file")
+        self.assertEqual(r["lens"], [3817, 2401], "only the fullest read of each survives")
+        self.assertEqual(r["dropped"], 53)
+
+    def test_grouping_ignores_the_rate(self):
+        """Two frames of different length at one time/div belong together, even though
+        their rates differ — which is the whole point of grouping before splitting."""
+        harness = recording_source() + (
+            "\nvar frames = [{ch1: new Array(100).fill(0), ch2: null,\n"
+            "               s: {t: 0, tpd: 0.5, len: 100, src: 'DataBuffer2'}},\n"
+            "              {ch1: new Array(4801).fill(0), ch2: null,\n"
+            "               s: {t: 200, tpd: 0.5, len: 4801, src: 'DataBuffer2'}}];\n"
+            "__emit(JSON.stringify({groups: groupByAcquisition(frames).length,\n"
+            "  rates: splitRecordingBySamplerate(frames).length}));\n"
+        )
+        r = run_js_json(harness)
+        self.assertEqual(r["groups"], 1, "one time/div and source is one acquisition")
+        self.assertEqual(r["rates"], 2, "...even though the rate split would see two")
+
+    def test_a_sub_hz_rate_is_reported(self):
+        """A .sr samplerate is a whole number of Hz, so anything below 1 Sa/s cannot be
+        written. Say so rather than flooring to 1 and stretching the timeline silently."""
+        harness = recording_source_with_zip() + (
+            "\nvar logged = []; log = function (m) { logged.push(m); };\n"
+            "showMessage = function () {};\n"
+            "downloadRecordingBlob = function () {};\n"
+            "var built = buildRecordingSegment([{ch1: new Array(11).fill(0.25), ch2: null,\n"
+            "  s: {t: 0, sr: 1, tpd: 10, len: 11, trigIdx: 1, src: 'DataBuffer2',\n"
+            "      demo: false, acq: 'Sample',\n"
+            "      ch1: {vpd: 0.5, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "      ch2: {on: false, vpd: 1, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "      trig: {src: 'CH1', mode: 'Auto', edge: 'rising', level: 1}}}],\n"
+            "  10 / 120, 1, 1, 'STAMP');\n"
+            "var sc = JSON.parse(__written.filter(function (e) {\n"
+            "  return e.name === 'dso2512g-recording.json'; })[0].text);\n"
+            "__emit(JSON.stringify(sc.warnings));\n"
+        )
+        warnings = run_js_json(harness)
+        self.assertTrue(any("below 1 Sa/s" in w for w in warnings),
+                        "a sub-Hz rate must be reported, got %r" % (warnings,))

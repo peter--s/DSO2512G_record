@@ -116,6 +116,11 @@ predicted from the timestamps and then confirmed against the samples, and only a
 match is stitched. One test recording went from 13 frames of 31,213 mostly duplicate samples
 to 4,801 genuine ones on a correct timeline.
 
+Stitching happens **before** the samplerate split, grouped by time/div and signal source.
+Partial reads differ in length and therefore in rate, so splitting first would put each one
+in a run of its own and the stitcher would never see a pair — which is exactly what made one
+real recording produce 259 single-frame files.
+
 **Over budget, each frame becomes its own file.** A `.sr` carries one uniform samplerate, so
 showing 1.5 s at 100 MSa/s costs 150 M samples even when 4,800 of them carry signal. The file
 stays small, but every consumer materialises the whole array. Past
@@ -126,6 +131,11 @@ size; gap buffers are shared, so the browser's cost does not grow with the dead 
 
 If that produces an unwieldy number of files, the recording is asking for more than the
 format can express: record at a slower time/div, or for less time.
+
+**A samplerate below 1 Sa/s cannot be written at all** — `.sr` stores whole Hz — so such a
+file says 1 Hz and its timeline is stretched by however far off that is. It only arises from
+a very slow time/div read before the acquisition filled, which stitching normally absorbs;
+where it survives, the sidecar says so rather than leaving the stretch silent.
 
 ### Limitations
 - **Frame placement is accurate to about one acquisition interval.** The timestamp is when
