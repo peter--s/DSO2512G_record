@@ -37,6 +37,10 @@ self‑contained `app_clean.html` (or to its extracted `app_clean_extracted.js` 
   not corrupt the frames that follow, and the result is the same across all three signal
   sources even though `WAV`, `DataBuffer` and `DataBuffer2` reach the samples by different
   routes.
+- **A frame carrying `NaN` among real readings is reported.** In single-channel mode
+  `DataBuffer2` interleaves CH2's and CH1's samples to double the rate, indexing both by
+  CH1's count, so a shorter CH2 leaves `NaN` in its half of the tail. Since `NaN` means
+  "no acquisition here" in this format, such a frame would otherwise pass as dead time.
 - **Frames with no usable samples are dropped.** Switching the signal source mid‑recording
   can yield one: the `WAV` path reads a second sample per point at a fixed offset, so a
   buffer shorter than that offset produces `NaN` for every point. Since `NaN` means "no data
@@ -88,7 +92,7 @@ nothing more. The sigrok v3 format solves this properly, with a per-frame packet
 [explicitly unimplemented](https://sigrok.org/wiki/File_format:Sigrok/v3). So the timeline
 has to be built out of samples, and these are the rules used.
 
-**A frame's samplerate is `(length − 1) / (12 × time-per-div)`.** This is the app's own rule —
+**A frame's samplerate is `(intended samples − 1) / (12 × time-per-div)`.** This is the app's own rule —
 everywhere it converts a sample index to a time it computes `totalTime = 12 × tpd` and
 divides by `n − 1`, and it draws by stretching the array across the grid. `appParam_sampleRate`
 is only the top-bar readout, and for `WAV` it is clamped to the hardware ceiling to keep that
@@ -103,6 +107,16 @@ sample. The sidecar flags this as `samplerate_is_display_points`, and each frame
 `intended_samples`, the real acquisition length. Record from `DataBuffer` if you want samples
 rather than the scope's rendering of them.
 
+The count is the *intended* acquisition length, not the array's length. In roll mode the
+app draws a partly-filled acquisition into the right-hand part of the grid rather than
+stretching it across the width — `processForPlotting()` left-pads by
+`width − (length / intendedDrawnSamples) × width`, so pixels per sample come out as
+`width / intendedSamples` however full the buffer is. Time per sample is therefore constant
+while the buffer fills, which is why the display stays correct throughout. Using the array
+length instead made one 100 Hz signal read as 16, 20 and 22 Hz across three consecutive
+reads of the same acquisition, and gave each read a rate of its own — which is what split
+such recordings into dozens of files.
+
 **Dead time between frames is NaN.** PulseView shows it as absent data, and a NaN run
 deflates about 1000:1, so it costs nothing on disk. Frames are placed at their true
 wall-clock offsets, taken from the arrival timestamp, which is accurate to roughly one
@@ -116,6 +130,26 @@ predicted from the timestamps and then confirmed against the samples, and only a
 match is stitched. One test recording went from 13 frames of 31,213 mostly duplicate samples
 to 4,801 genuine ones on a correct timeline.
 
+Stitching happens **before** the samplerate split, grouped by time/div and signal source.
+Partial reads differ in length and therefore in rate, so splitting first would put each one
+in a run of its own and the stitcher would never see a pair — which is exactly what made one
+real recording produce 259 single-frame files.
+
+**The unsettled tail of a partial read is trimmed.** While a slow acquisition fills, the
+scope reports slightly more samples than have settled: measured over one 500 ms/div fill
+cycle, the last ~20 samples of a read are contradicted by the next, on every read whose
+count grew by 160 or 192 and on none that grew by 128. They hold plausible voltages with
+transitions missing, which merges two pulses into one wide one. Every consecutive pair
+reveals its own frontier, so the size is measured from the recording rather than assumed,
+and the newer read supersedes the older wherever they overlap. Only the last read of a cycle
+has no successor to correct it, so only that one is trimmed — by the largest frontier that
+cycle actually showed, or not at all if none was seen.
+
+A read whose length is exactly 1200, 601, 600, 481 or 480 also carries a duplicated first
+sample: `trimWaveArray()` adds it so the count is odd and the trigger lands on the centre
+sample, which is right for a complete acquisition but spurious for a filling buffer that
+happens to pass through those lengths. The comparison tolerates that one-sample offset.
+
 **Over budget, each frame becomes its own file.** A `.sr` carries one uniform samplerate, so
 showing 1.5 s at 100 MSa/s costs 150 M samples even when 4,800 of them carry signal. The file
 stays small, but every consumer materialises the whole array. Past
@@ -126,6 +160,11 @@ size; gap buffers are shared, so the browser's cost does not grow with the dead 
 
 If that produces an unwieldy number of files, the recording is asking for more than the
 format can express: record at a slower time/div, or for less time.
+
+**A samplerate below 1 Sa/s cannot be written at all** — `.sr` stores whole Hz — so such a
+file says 1 Hz and its timeline is stretched by however far off that is. It only arises from
+a very slow time/div read before the acquisition filled, which stitching normally absorbs;
+where it survives, the sidecar says so rather than leaving the stretch silent.
 
 ### Limitations
 - **Frame placement is accurate to about one acquisition interval.** The timestamp is when

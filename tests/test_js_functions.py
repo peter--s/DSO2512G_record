@@ -665,3 +665,321 @@ class TestExportEmitsAWellFormedArchive(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestStitchBeforeSplit(unittest.TestCase):
+    """Stitching must happen before the samplerate split, not after.
+
+    Partial reads of a filling buffer differ in length and therefore in rate. Splitting
+    first put every one of them in a run of its own, so the stitcher never saw a pair and
+    was inert exactly where it was designed to work — a real recording produced 259
+    single-frame files because of it.
+    """
+
+    # The fill ramps observed at 0.5 s/div and 1 s/div in DSO2512G_recording_20260901T101757.
+    RAMP_HALF = [75, 155, 219, 315, 395, 459, 555, 635, 699, 795, 875, 939, 1035, 1115,
+                 1179, 1275, 1355, 1419, 1515, 1595, 1659, 1755, 1835, 1899, 1995, 2075,
+                 2139, 2235, 2315, 2379, 2401, 3817]
+    RAMP_ONE = [35, 67, 115, 155, 187, 235, 275, 307, 355, 395, 427, 475, 515, 547, 595,
+                635, 667, 715, 755, 787, 835, 875, 2401]
+
+    def _run(self):
+        harness = recording_source() + (
+            "\nvar base = []; for (var i = 0; i < 8000; i++) base.push(Math.sin(i / 41));\n"
+            "function build(lens, tpd, t0) {\n"
+            "  return lens.map(function (n, i) {\n"
+            "    return {ch1: base.slice(0, n), ch2: null,\n"
+            "            s: {t: t0 + i * 200, tpd: tpd, len: n, src: 'DataBuffer2'}}; });\n"
+            "}\n"
+            "var frames = build(%s, 0.5, 0).concat(build(%s, 1, 20000));\n"
+            "var out = [], dropped = 0;\n"
+            "groupByAcquisition(frames).forEach(function (g) {\n"
+            "  var r = stitchRollingFrames(g.frames, recGroupSampleRate(g.frames));\n"
+            "  dropped += r.dropped; out = out.concat(r.frames);\n"
+            "});\n"
+            "__emit(JSON.stringify({inn: frames.length, out: out.length, dropped: dropped,\n"
+            "  files: splitRecordingBySamplerate(out).length,\n"
+            "  lens: out.map(function (f) { return f.ch1.length; })}));\n"
+            % (json.dumps(self.RAMP_HALF), json.dumps(self.RAMP_ONE))
+        )
+        return run_js_json(harness)
+
+    def test_two_fill_ramps_become_two_files(self):
+        r = self._run()
+        self.assertEqual(r["inn"], 55)
+        self.assertEqual(r["files"], 2, "each fill ramp is one acquisition, so one file")
+        self.assertEqual(r["lens"], [3817, 2401], "only the fullest read of each survives")
+        self.assertEqual(r["dropped"], 53)
+
+    def test_grouping_ignores_the_rate(self):
+        """Two frames of different length at one time/div belong together, even though
+        their rates differ — which is the whole point of grouping before splitting."""
+        harness = recording_source() + (
+            "\nvar frames = [{ch1: new Array(100).fill(0), ch2: null,\n"
+            "               s: {t: 0, tpd: 0.5, len: 100, src: 'DataBuffer2'}},\n"
+            "              {ch1: new Array(4801).fill(0), ch2: null,\n"
+            "               s: {t: 200, tpd: 0.5, len: 4801, src: 'DataBuffer2'}}];\n"
+            "__emit(JSON.stringify({groups: groupByAcquisition(frames).length,\n"
+            "  rates: splitRecordingBySamplerate(frames).length}));\n"
+        )
+        r = run_js_json(harness)
+        self.assertEqual(r["groups"], 1, "one time/div and source is one acquisition")
+        self.assertEqual(r["rates"], 2, "...even though the rate split would see two")
+
+    def test_a_sub_hz_rate_is_reported(self):
+        """A .sr samplerate is a whole number of Hz, so anything below 1 Sa/s cannot be
+        written. Say so rather than flooring to 1 and stretching the timeline silently."""
+        harness = recording_source_with_zip() + (
+            "\nvar logged = []; log = function (m) { logged.push(m); };\n"
+            "showMessage = function () {};\n"
+            "downloadRecordingBlob = function () {};\n"
+            "var built = buildRecordingSegment([{ch1: new Array(11).fill(0.25), ch2: null,\n"
+            "  s: {t: 0, sr: 1, tpd: 10, len: 11, trigIdx: 1, src: 'DataBuffer2',\n"
+            "      demo: false, acq: 'Sample',\n"
+            "      ch1: {vpd: 0.5, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "      ch2: {on: false, vpd: 1, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "      trig: {src: 'CH1', mode: 'Auto', edge: 'rising', level: 1}}}],\n"
+            "  10 / 120, 1, 1, 'STAMP');\n"
+            "var sc = JSON.parse(__written.filter(function (e) {\n"
+            "  return e.name === 'dso2512g-recording.json'; })[0].text);\n"
+            "__emit(JSON.stringify(sc.warnings));\n"
+        )
+        warnings = run_js_json(harness)
+        self.assertTrue(any("below 1 Sa/s" in w for w in warnings),
+                        "a sub-Hz rate must be reported, got %r" % (warnings,))
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestPartialReadSampleRate(unittest.TestCase):
+    """A partly-filled acquisition keeps the acquisition's rate, not its own length's.
+
+    In roll mode the app draws an incomplete waveform into the right-hand part of the grid
+    instead of stretching it across the width — processForPlotting() left-pads by
+    width - (length / intendedDrawnSamples) * width, so pixels per sample come out as
+    width / intendedSamples however full the buffer is. Time per sample is constant while it
+    fills, which is why the screen stays right.
+
+    Deriving the rate from the array length instead made one 100 Hz signal read as 16, 20 and
+    22 Hz across three consecutive reads of the same acquisition.
+    """
+
+    # Real reads at 500 ms/div from DSO2512G_recording_20260901T012911, where a complete
+    # acquisition is 4801 samples and the generator was set to 100 Hz.
+    READS = [778, 954, 1082, 4801]
+    FULL = 4801
+    TPD = 0.5
+    PERIOD_SAMPLES = 8          # measured: 6 high + 2 low
+
+    def _rates(self, intended):
+        harness = recording_source() + (
+            "\n__emit(JSON.stringify(%s.map(function (n) {\n"
+            "  return recFrameSampleRate({tpd: %s, intended: %s}, n); })));\n"
+            % (json.dumps(self.READS), self.TPD, json.dumps(intended))
+        )
+        return run_js_json(harness)
+
+    def test_every_read_of_one_acquisition_shares_its_rate(self):
+        rates = self._rates(self.FULL)
+        self.assertEqual(len(set(rates)), 1, "partial reads disagreed on the rate: %s" % rates)
+        self.assertAlmostEqual(rates[0], (self.FULL - 1) / (12 * self.TPD), places=6)
+
+    def test_the_signal_reads_the_same_frequency_in_every_read(self):
+        """The measurement that exposed this: the generator never changed."""
+        for rate in self._rates(self.FULL):
+            self.assertAlmostEqual(rate / self.PERIOD_SAMPLES, 100.0, delta=0.5)
+
+    def test_using_the_array_length_would_be_wrong(self):
+        """Guards the regression directly — without `intended` the rates diverge."""
+        rates = self._rates(None)
+        self.assertGreater(len(set(rates)), 1, "expected the broken form to disagree")
+        freqs = [r / self.PERIOD_SAMPLES for r in rates]
+        self.assertLess(min(freqs), 20.0, "the broken form under-reports badly: %s" % freqs)
+
+    def test_a_complete_frame_is_unaffected(self):
+        """Outside roll mode length equals intended, so the rule is unchanged."""
+        harness = recording_source() + (
+            "\n__emit(JSON.stringify([\n"
+            "  recFrameSampleRate({tpd: 0.005, intended: 2401}, 2401),\n"
+            "  recFrameSampleRate({tpd: 0.005}, 2401)]));\n"
+        )
+        with_intended, without = run_js_json(harness)
+        self.assertAlmostEqual(with_intended, without, places=6)
+        self.assertAlmostEqual(with_intended, 40000.0, places=3)
+
+    def test_partial_reads_no_longer_fragment_the_export(self):
+        """Sharing a rate means sharing a segment, which removes the fragmentation at its
+        source rather than compensating for it afterwards."""
+        harness = recording_source() + (
+            "\nvar frames = %s.map(function (n) {\n"
+            "  return {ch1: new Array(n).fill(0.25), ch2: null,\n"
+            "          s: {t: 0, tpd: %s, len: n, intended: %d, src: 'DataBuffer2'}}; });\n"
+            "__emit(JSON.stringify(splitRecordingBySamplerate(frames).length));\n"
+            % (json.dumps(self.READS), self.TPD, self.FULL)
+        )
+        self.assertEqual(run_js_json(harness), 1,
+                         "reads of one acquisition must not split into separate files")
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestUnsettledTail(unittest.TestCase):
+    """The last samples of a partial read are revised by the next one.
+
+    While a slow acquisition fills, the scope reports slightly more samples than have
+    settled. Measured over one 500 ms/div fill cycle, the last ~20 samples of a read are
+    contradicted by the next, on every read whose count grew by 160 or 192 and on none that
+    grew by 128. Those samples hold plausible voltages with transitions missing, which merges
+    two pulses into one wide one — the visible symptom that started this.
+    """
+
+    @staticmethod
+    def _cycle_js(lengths, frontier, period=8, high=6):
+        """A filling buffer whose reads carry `frontier` unsettled samples at the end."""
+        return (
+            "\nvar truth = [];\n"
+            "for (var i = 0; i < 6000; i++) truth.push((i %% %d) < %d ? 2.44 : 0.0);\n"
+            "var frames = %s.map(function (n, idx) {\n"
+            "  var a = truth.slice(0, n);\n"
+            "  for (var j = Math.max(0, n - %d); j < n; j++) a[j] = 2.44;  // unsettled: flat\n"
+            "  return {ch1: a, ch2: null,\n"
+            "          s: {t: idx * 200, tpd: 0.5, len: n, intended: 4801, src: 'DataBuffer2'}};\n"
+            "});\n" % (period, high, json.dumps(lengths), frontier)
+        )
+
+    def _run(self, lengths, frontier):
+        harness = recording_source() + self._cycle_js(lengths, frontier) + (
+            "var r = stitchRollingFrames(frames, recGroupSampleRate(frames));\n"
+            "var f = r.frames[r.frames.length - 1].ch1;\n"
+            "var runs = [], cur = null, n = 0;\n"
+            "for (var i = 0; i < f.length; i++) {\n"
+            "  var hi = f[i] > 1.2;\n"
+            "  if (cur === null) { cur = hi; n = 1; }\n"
+            "  else if (hi === cur) { n++; }\n"
+            "  else { runs.push(n); cur = hi; n = 1; }\n"
+            "}\n"
+            "runs.push(n);\n"
+            "__emit(JSON.stringify({frames: r.frames.length, len: f.length,\n"
+            "  trimmed: r.trimmed, merged: r.dropped + r.stitched,\n"
+            "  widest: Math.max.apply(null, runs)}));\n"
+        )
+        return run_js_json(harness)
+
+    def test_a_fill_cycle_collapses_to_one_frame(self):
+        r = self._run([186, 314, 506, 666, 794, 986, 1146], 20)
+        self.assertEqual(r["frames"], 1, "reads of one acquisition are one frame")
+        self.assertEqual(r["merged"], 6, "every later read should fold into the first")
+
+    def test_the_unsettled_tail_is_trimmed(self):
+        """The last read has no successor, so its own tail was never corrected."""
+        r = self._run([186, 314, 506, 666, 794, 986, 1146], 20)
+        self.assertGreaterEqual(r["trimmed"], 20,
+                                "expected the measured frontier to be trimmed")
+        self.assertLess(r["len"], 1146, "the final read should end short of its full length")
+
+    def test_no_merged_pulse_survives(self):
+        """The symptom: a flat unsettled tail merges pulses into one wide run."""
+        r = self._run([186, 314, 506, 666, 794, 986, 1146], 20)
+        self.assertLessEqual(r["widest"], 6,
+                             "a run wider than the signal's own pulse survived: %d" % r["widest"])
+
+    def test_a_clean_cycle_loses_nothing(self):
+        """With no unsettled tail there is nothing to measure, so nothing is trimmed."""
+        r = self._run([186, 314, 506, 666, 794, 986, 1146], 0)
+        self.assertEqual(r["frames"], 1)
+        self.assertEqual(r["trimmed"], 0)
+        self.assertEqual(r["len"], 1146, "a clean read must be kept in full")
+
+    def test_a_padded_read_still_matches_its_neighbours(self):
+        """trimWaveArray() prepends a duplicate of sample 0 when a read's length is exactly
+        1200, 601, 600, 481 or 480, to make the count odd so the trigger lands on the centre
+        sample. A filling buffer sweeps through those lengths and gets the pad spuriously,
+        offsetting one read by a sample; it must still be recognised as the same acquisition.
+        """
+        harness = recording_source() + (
+            "\nvar truth = []; for (var i = 0; i < 3000; i++) truth.push((i % 8) < 6 ? 2.44 : 0.0);\n"
+            "var frames = [320, 480, 640].map(function (n, idx) {\n"
+            "  var a = truth.slice(0, n);\n"
+            "  if (n === 480) a = [a[0]].concat(a);      // the spurious centring pad\n"
+            "  return {ch1: a, ch2: null,\n"
+            "          s: {t: idx * 200, tpd: 0.5, len: a.length, intended: 4801, src: 'DataBuffer2'}};\n"
+            "});\n"
+            "var r = stitchRollingFrames(frames, recGroupSampleRate(frames));\n"
+            "__emit(JSON.stringify({frames: r.frames.length}));\n"
+        )
+        r = run_js_json(harness)
+        self.assertEqual(r["frames"], 1, "a one-sample pad must not break the match")
+
+    def test_a_complete_acquisition_is_untouched(self):
+        """Complete reads never carry an unsettled tail, so nothing may be trimmed."""
+        harness = recording_source() + (
+            "\nvar truth = []; for (var i = 0; i < 5000; i++) truth.push((i % 8) < 6 ? 2.44 : 0.0);\n"
+            "var frames = [0, 1].map(function (idx) {\n"
+            "  return {ch1: truth.slice(0, 2401), ch2: null,\n"
+            "          s: {t: idx * 200, tpd: 0.005, len: 2401, intended: 2401, src: 'DataBuffer'}};\n"
+            "});\n"
+            "var r = stitchRollingFrames(frames, recGroupSampleRate(frames));\n"
+            "__emit(JSON.stringify({trimmed: r.trimmed,\n"
+            "  lens: r.frames.map(function (f) { return f.ch1.length; })}));\n"
+        )
+        r = run_js_json(harness)
+        self.assertEqual(r["trimmed"], 0)
+        self.assertTrue(all(n == 2401 for n in r["lens"]),
+                        "a complete acquisition must keep every sample: %s" % r["lens"])
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestHoledFrameWarning(unittest.TestCase):
+    """NaN among real readings is missing data, not dead time.
+
+    In single-channel mode `DataBuffer2` interleaves CH2's and CH1's samples to double the
+    rate, indexing both by CH1's count. A shorter CH2 makes `parseInt('', 16)` return NaN for
+    the CH2-derived positions of the tail. The app guards the case where CH2 is absent
+    entirely, but not this one, so the frame reaches the export looking like absent data.
+    """
+
+    def _warnings(self, ch1_js):
+        harness = recording_source_with_zip() + (
+            "\nvar logged = []; log = function (m) { logged.push(m); };\n"
+            "showMessage = function () {}; downloadRecordingBlob = function () {};\n"
+            "buildRecordingSegment([{ch1: %s, ch2: null,\n"
+            "  s: {t: 0, sr: 40000, tpd: 0.005, len: 8, trigIdx: 4, src: 'DataBuffer2',\n"
+            "      intended: 8, demo: false, acq: 'Sample',\n"
+            "      ch1: {vpd: 0.5, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "      ch2: {on: false, vpd: 1, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "      trig: {src: 'CH1', mode: 'Auto', edge: 'rising', level: 1}}}],\n"
+            "  40000, 1, 1, 'STAMP');\n"
+            "var sc = JSON.parse(__written.filter(function (e) {\n"
+            "  return e.name === 'dso2512g-recording.json'; })[0].text);\n"
+            "__emit(JSON.stringify(sc.warnings));\n" % ch1_js
+        )
+        return run_js_json(harness)
+
+    def test_interleaved_gaps_are_reported(self):
+        """NaN in alternate positions of the tail — the shape a short CH2 produces."""
+        w = self._warnings("[0.2, 0.3, 0.2, 0.3, NaN, 0.3, NaN, 0.3]")
+        self.assertTrue(any("mismatched" in x for x in w),
+                        "a holed frame must be reported, got %r" % (w,))
+
+    def test_a_clean_frame_is_not_reported(self):
+        w = self._warnings("[0.2, 0.3, 0.2, 0.3, 0.2, 0.3, 0.2, 0.3]")
+        self.assertFalse(any("mismatched" in x for x in w), "clean frame wrongly flagged")
+
+    def test_dead_time_is_not_confused_with_a_hole(self):
+        """A gap between frames is all-NaN and carries no readings, so it is not a hole."""
+        harness = recording_source_with_zip() + (
+            "\nlog = function () {}; showMessage = function () {};\n"
+            "downloadRecordingBlob = function () {};\n"
+            "var mk = function (t) { return {ch1: [0.2, 0.3, 0.2, 0.3, 0.2, 0.3, 0.2, 0.3],\n"
+            "  ch2: null, s: {t: t, sr: 40000, tpd: 0.005, len: 8, trigIdx: 4,\n"
+            "    src: 'DataBuffer2', intended: 8, demo: false, acq: 'Sample',\n"
+            "    ch1: {vpd: 0.5, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "    ch2: {on: false, vpd: 1, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "    trig: {src: 'CH1', mode: 'Auto', edge: 'rising', level: 1}}}; };\n"
+            "buildRecordingSegment([mk(0), mk(500)], 40000, 1, 1, 'STAMP');\n"
+            "var sc = JSON.parse(__written.filter(function (e) {\n"
+            "  return e.name === 'dso2512g-recording.json'; })[0].text);\n"
+            "__emit(JSON.stringify({w: sc.warnings, gap: sc.frames[1].gap_before}));\n"
+        )
+        r = run_js_json(harness)
+        self.assertGreater(r["gap"], 0, "the two frames should be separated by dead time")
+        self.assertFalse(any("mismatched" in x for x in r["w"]))
