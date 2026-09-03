@@ -37,6 +37,10 @@ self‑contained `app_clean.html` (or to its extracted `app_clean_extracted.js` 
   not corrupt the frames that follow, and the result is the same across all three signal
   sources even though `WAV`, `DataBuffer` and `DataBuffer2` reach the samples by different
   routes.
+- **A frame carrying `NaN` among real readings is reported.** In single-channel mode
+  `DataBuffer2` interleaves CH2's and CH1's samples to double the rate, indexing both by
+  CH1's count, so a shorter CH2 leaves `NaN` in its half of the tail. Since `NaN` means
+  "no acquisition here" in this format, such a frame would otherwise pass as dead time.
 - **Frames with no usable samples are dropped.** Switching the signal source mid‑recording
   can yield one: the `WAV` path reads a second sample per point at a fixed offset, so a
   buffer shorter than that offset produces `NaN` for every point. Since `NaN` means "no data
@@ -130,6 +134,21 @@ Stitching happens **before** the samplerate split, grouped by time/div and signa
 Partial reads differ in length and therefore in rate, so splitting first would put each one
 in a run of its own and the stitcher would never see a pair — which is exactly what made one
 real recording produce 259 single-frame files.
+
+**The unsettled tail of a partial read is trimmed.** While a slow acquisition fills, the
+scope reports slightly more samples than have settled: measured over one 500 ms/div fill
+cycle, the last ~20 samples of a read are contradicted by the next, on every read whose
+count grew by 160 or 192 and on none that grew by 128. They hold plausible voltages with
+transitions missing, which merges two pulses into one wide one. Every consecutive pair
+reveals its own frontier, so the size is measured from the recording rather than assumed,
+and the newer read supersedes the older wherever they overlap. Only the last read of a cycle
+has no successor to correct it, so only that one is trimmed — by the largest frontier that
+cycle actually showed, or not at all if none was seen.
+
+A read whose length is exactly 1200, 601, 600, 481 or 480 also carries a duplicated first
+sample: `trimWaveArray()` adds it so the count is odd and the trigger lands on the centre
+sample, which is right for a complete acquisition but spurious for a filling buffer that
+happens to pass through those lengths. The comparison tolerates that one-sample offset.
 
 **Over budget, each frame becomes its own file.** A `.sr` carries one uniform samplerate, so
 showing 1.5 s at 100 MSa/s costs 150 M samples even when 4,800 of them carry signal. The file

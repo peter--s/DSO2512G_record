@@ -819,3 +819,167 @@ class TestPartialReadSampleRate(unittest.TestCase):
         )
         self.assertEqual(run_js_json(harness), 1,
                          "reads of one acquisition must not split into separate files")
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestUnsettledTail(unittest.TestCase):
+    """The last samples of a partial read are revised by the next one.
+
+    While a slow acquisition fills, the scope reports slightly more samples than have
+    settled. Measured over one 500 ms/div fill cycle, the last ~20 samples of a read are
+    contradicted by the next, on every read whose count grew by 160 or 192 and on none that
+    grew by 128. Those samples hold plausible voltages with transitions missing, which merges
+    two pulses into one wide one — the visible symptom that started this.
+    """
+
+    @staticmethod
+    def _cycle_js(lengths, frontier, period=8, high=6):
+        """A filling buffer whose reads carry `frontier` unsettled samples at the end."""
+        return (
+            "\nvar truth = [];\n"
+            "for (var i = 0; i < 6000; i++) truth.push((i %% %d) < %d ? 2.44 : 0.0);\n"
+            "var frames = %s.map(function (n, idx) {\n"
+            "  var a = truth.slice(0, n);\n"
+            "  for (var j = Math.max(0, n - %d); j < n; j++) a[j] = 2.44;  // unsettled: flat\n"
+            "  return {ch1: a, ch2: null,\n"
+            "          s: {t: idx * 200, tpd: 0.5, len: n, intended: 4801, src: 'DataBuffer2'}};\n"
+            "});\n" % (period, high, json.dumps(lengths), frontier)
+        )
+
+    def _run(self, lengths, frontier):
+        harness = recording_source() + self._cycle_js(lengths, frontier) + (
+            "var r = stitchRollingFrames(frames, recGroupSampleRate(frames));\n"
+            "var f = r.frames[r.frames.length - 1].ch1;\n"
+            "var runs = [], cur = null, n = 0;\n"
+            "for (var i = 0; i < f.length; i++) {\n"
+            "  var hi = f[i] > 1.2;\n"
+            "  if (cur === null) { cur = hi; n = 1; }\n"
+            "  else if (hi === cur) { n++; }\n"
+            "  else { runs.push(n); cur = hi; n = 1; }\n"
+            "}\n"
+            "runs.push(n);\n"
+            "__emit(JSON.stringify({frames: r.frames.length, len: f.length,\n"
+            "  trimmed: r.trimmed, merged: r.dropped + r.stitched,\n"
+            "  widest: Math.max.apply(null, runs)}));\n"
+        )
+        return run_js_json(harness)
+
+    def test_a_fill_cycle_collapses_to_one_frame(self):
+        r = self._run([186, 314, 506, 666, 794, 986, 1146], 20)
+        self.assertEqual(r["frames"], 1, "reads of one acquisition are one frame")
+        self.assertEqual(r["merged"], 6, "every later read should fold into the first")
+
+    def test_the_unsettled_tail_is_trimmed(self):
+        """The last read has no successor, so its own tail was never corrected."""
+        r = self._run([186, 314, 506, 666, 794, 986, 1146], 20)
+        self.assertGreaterEqual(r["trimmed"], 20,
+                                "expected the measured frontier to be trimmed")
+        self.assertLess(r["len"], 1146, "the final read should end short of its full length")
+
+    def test_no_merged_pulse_survives(self):
+        """The symptom: a flat unsettled tail merges pulses into one wide run."""
+        r = self._run([186, 314, 506, 666, 794, 986, 1146], 20)
+        self.assertLessEqual(r["widest"], 6,
+                             "a run wider than the signal's own pulse survived: %d" % r["widest"])
+
+    def test_a_clean_cycle_loses_nothing(self):
+        """With no unsettled tail there is nothing to measure, so nothing is trimmed."""
+        r = self._run([186, 314, 506, 666, 794, 986, 1146], 0)
+        self.assertEqual(r["frames"], 1)
+        self.assertEqual(r["trimmed"], 0)
+        self.assertEqual(r["len"], 1146, "a clean read must be kept in full")
+
+    def test_a_padded_read_still_matches_its_neighbours(self):
+        """trimWaveArray() prepends a duplicate of sample 0 when a read's length is exactly
+        1200, 601, 600, 481 or 480, to make the count odd so the trigger lands on the centre
+        sample. A filling buffer sweeps through those lengths and gets the pad spuriously,
+        offsetting one read by a sample; it must still be recognised as the same acquisition.
+        """
+        harness = recording_source() + (
+            "\nvar truth = []; for (var i = 0; i < 3000; i++) truth.push((i % 8) < 6 ? 2.44 : 0.0);\n"
+            "var frames = [320, 480, 640].map(function (n, idx) {\n"
+            "  var a = truth.slice(0, n);\n"
+            "  if (n === 480) a = [a[0]].concat(a);      // the spurious centring pad\n"
+            "  return {ch1: a, ch2: null,\n"
+            "          s: {t: idx * 200, tpd: 0.5, len: a.length, intended: 4801, src: 'DataBuffer2'}};\n"
+            "});\n"
+            "var r = stitchRollingFrames(frames, recGroupSampleRate(frames));\n"
+            "__emit(JSON.stringify({frames: r.frames.length}));\n"
+        )
+        r = run_js_json(harness)
+        self.assertEqual(r["frames"], 1, "a one-sample pad must not break the match")
+
+    def test_a_complete_acquisition_is_untouched(self):
+        """Complete reads never carry an unsettled tail, so nothing may be trimmed."""
+        harness = recording_source() + (
+            "\nvar truth = []; for (var i = 0; i < 5000; i++) truth.push((i % 8) < 6 ? 2.44 : 0.0);\n"
+            "var frames = [0, 1].map(function (idx) {\n"
+            "  return {ch1: truth.slice(0, 2401), ch2: null,\n"
+            "          s: {t: idx * 200, tpd: 0.005, len: 2401, intended: 2401, src: 'DataBuffer'}};\n"
+            "});\n"
+            "var r = stitchRollingFrames(frames, recGroupSampleRate(frames));\n"
+            "__emit(JSON.stringify({trimmed: r.trimmed,\n"
+            "  lens: r.frames.map(function (f) { return f.ch1.length; })}));\n"
+        )
+        r = run_js_json(harness)
+        self.assertEqual(r["trimmed"], 0)
+        self.assertTrue(all(n == 2401 for n in r["lens"]),
+                        "a complete acquisition must keep every sample: %s" % r["lens"])
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestHoledFrameWarning(unittest.TestCase):
+    """NaN among real readings is missing data, not dead time.
+
+    In single-channel mode `DataBuffer2` interleaves CH2's and CH1's samples to double the
+    rate, indexing both by CH1's count. A shorter CH2 makes `parseInt('', 16)` return NaN for
+    the CH2-derived positions of the tail. The app guards the case where CH2 is absent
+    entirely, but not this one, so the frame reaches the export looking like absent data.
+    """
+
+    def _warnings(self, ch1_js):
+        harness = recording_source_with_zip() + (
+            "\nvar logged = []; log = function (m) { logged.push(m); };\n"
+            "showMessage = function () {}; downloadRecordingBlob = function () {};\n"
+            "buildRecordingSegment([{ch1: %s, ch2: null,\n"
+            "  s: {t: 0, sr: 40000, tpd: 0.005, len: 8, trigIdx: 4, src: 'DataBuffer2',\n"
+            "      intended: 8, demo: false, acq: 'Sample',\n"
+            "      ch1: {vpd: 0.5, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "      ch2: {on: false, vpd: 1, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "      trig: {src: 'CH1', mode: 'Auto', edge: 'rising', level: 1}}}],\n"
+            "  40000, 1, 1, 'STAMP');\n"
+            "var sc = JSON.parse(__written.filter(function (e) {\n"
+            "  return e.name === 'dso2512g-recording.json'; })[0].text);\n"
+            "__emit(JSON.stringify(sc.warnings));\n" % ch1_js
+        )
+        return run_js_json(harness)
+
+    def test_interleaved_gaps_are_reported(self):
+        """NaN in alternate positions of the tail — the shape a short CH2 produces."""
+        w = self._warnings("[0.2, 0.3, 0.2, 0.3, NaN, 0.3, NaN, 0.3]")
+        self.assertTrue(any("mismatched" in x for x in w),
+                        "a holed frame must be reported, got %r" % (w,))
+
+    def test_a_clean_frame_is_not_reported(self):
+        w = self._warnings("[0.2, 0.3, 0.2, 0.3, 0.2, 0.3, 0.2, 0.3]")
+        self.assertFalse(any("mismatched" in x for x in w), "clean frame wrongly flagged")
+
+    def test_dead_time_is_not_confused_with_a_hole(self):
+        """A gap between frames is all-NaN and carries no readings, so it is not a hole."""
+        harness = recording_source_with_zip() + (
+            "\nlog = function () {}; showMessage = function () {};\n"
+            "downloadRecordingBlob = function () {};\n"
+            "var mk = function (t) { return {ch1: [0.2, 0.3, 0.2, 0.3, 0.2, 0.3, 0.2, 0.3],\n"
+            "  ch2: null, s: {t: t, sr: 40000, tpd: 0.005, len: 8, trigIdx: 4,\n"
+            "    src: 'DataBuffer2', intended: 8, demo: false, acq: 'Sample',\n"
+            "    ch1: {vpd: 0.5, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "    ch2: {on: false, vpd: 1, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "    trig: {src: 'CH1', mode: 'Auto', edge: 'rising', level: 1}}}; };\n"
+            "buildRecordingSegment([mk(0), mk(500)], 40000, 1, 1, 'STAMP');\n"
+            "var sc = JSON.parse(__written.filter(function (e) {\n"
+            "  return e.name === 'dso2512g-recording.json'; })[0].text);\n"
+            "__emit(JSON.stringify({w: sc.warnings, gap: sc.frames[1].gap_before}));\n"
+        )
+        r = run_js_json(harness)
+        self.assertGreater(r["gap"], 0, "the two frames should be separated by dead time")
+        self.assertFalse(any("mismatched" in x for x in r["w"]))
