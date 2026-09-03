@@ -53,16 +53,23 @@ function recShowMessage(text) {
 
 // Samples per second for one frame, using the app's own rule.
 //
-// The app never derives time from appParam_sampleRate. Everywhere it turns a sample index
-// into a time - filterLowPass(), the measurements, the cursors - it does
-//     totalTime = timePerDivision * 12;  timePerSample = totalTime / (n - 1);
-// and the X axis simply stretches the array across the grid. appParam_sampleRate is the
-// top-bar readout, and for WAV it is clamped to the hardware ceiling so that readout stays
-// sane. Building the export on it stretched WAV frames by 12.5x; this is the same formula
-// the rest of the app uses, so a frame always occupies exactly its 12 divisions.
+// The app never derives time from appParam_sampleRate - that is the top-bar readout, clamped
+// to the hardware ceiling for WAV so it stays sane, and building the export on it stretched
+// WAV frames by 12.5x. Everywhere the app actually needs time it divides 12 * tpd by the
+// sample count, so a complete frame occupies exactly its twelve divisions.
+//
+// The count that matters is the INTENDED one, not the array's length. In roll mode the app
+// draws a partly-filled acquisition into the right-hand part of the grid rather than
+// stretching it across the whole width - processForPlotting() left-pads by
+//     width - (length / intendedDrawnSamples) * width
+// so its pixels-per-sample works out to width / intendedSamples whatever the fill level.
+// Time per sample is therefore constant while the buffer fills, which is why the display
+// stays correct. Using the array length instead made one 100 Hz signal read as 16, 20 and
+// 22 Hz across three consecutive partial reads of the same acquisition.
 function recFrameSampleRate(s, length) {
     const tpd = (s && isFinite(s.tpd) && s.tpd > 0) ? s.tpd : 1;
-    return Math.max(1, (Math.max(2, length) - 1) / (12 * tpd));
+    const intended = (s && isFinite(s.intended) && s.intended >= 2) ? s.intended : length;
+    return (Math.max(2, intended) - 1) / (12 * tpd);
 }
 
 // Captures the acquisition settings in force for the frame currently being snapshotted.
@@ -332,15 +339,51 @@ function buildRecordingSidecar(timeline, ch2Enabled, warnings, segIndex, segCoun
 // arrival interval, to a mean difference of 0.0000 V. Writing them as separate frames
 // duplicates most of the samples onto a timeline that cannot hold them.
 //
+// How many samples at the end of `prev` the following read contradicts.
+//
+// While a slow acquisition fills, the scope reports slightly more samples than have settled:
+// measured over one 500 ms/div fill cycle the last ~20 samples of a read are revised by the
+// next one, on every read whose sample count grew by 160 or 192 and on none that grew by
+// 128. Those samples hold plausible voltages with transitions missing, which merges two
+// pulses into one wide one - the visible symptom.
+//
+// Returns the count, so it can be excluded from comparisons and trimmed from the final read
+// of a cycle, which has no successor to correct it. Nothing here assumes a size; it is
+// measured from the recording, and so belongs to that instrument and timebase.
+function recFrontierSize(prev, next, shift) {
+    const overlap = next.length - shift;
+    const base = prev.length - overlap;
+    if (overlap <= 0 || base < 0) return 0;
+    // The unsettled samples are scattered, not contiguous - in one measured pair only 6 of
+    // the last 20 actually differ - so the frontier is everything from the FIRST disagreement
+    // to the end. Counting back from the last one instead would report a handful of samples
+    // and leave the merged pulses in place.
+    for (let i = 0; i < overlap; i++) {
+        const a = prev[base + i], b = next[i];
+        const same = (isNaN(a) && isNaN(b)) || (!isNaN(a) && !isNaN(b) && Math.abs(a - b) <= 1e-6);
+        if (!same) return overlap - i;
+    }
+    return 0;
+}
+
 // True when `next` is `prev` advanced by `shift` samples: the tail of prev must equal the
 // head of next. A still-filling acquisition is the same test with shift = next.length -
 // prev.length, which compares prev against next's head - so one rule covers both.
-function recOverlapMatches(prev, next, shift) {
-    const overlap = next.length - shift;
-    const base = prev.length - overlap;
-    if (overlap < 32 || base < 0) return false;
-    const step = Math.max(1, Math.floor(overlap / 256)); // sampling the overlap is enough
-    for (let i = 0; i < overlap; i += step) {
+//
+// `slack` samples at the end of prev are excluded, because a read's unsettled tail is
+// revised by the very read being compared against. `startSkip` ignores that many samples at
+// the head: trimWaveArray() prepends a duplicate of sample 0 whenever a read's length is
+// exactly 1200, 601, 600, 481 or 480, to make the count odd so the trigger lands on the
+// centre sample. That is right for a complete acquisition, but a filling buffer sweeps
+// through those lengths and gets the pad spuriously, offsetting one read by a sample.
+function recOverlapMatches(prev, next, shift, slack, startSkip) {
+    slack = slack || 0;
+    startSkip = startSkip || 0;
+    const overlap = next.length - shift - slack;
+    const base = prev.length - (next.length - shift);
+    if (overlap - startSkip < 32 || base < 0) return false;
+    const step = Math.max(1, Math.floor((overlap - startSkip) / 256));
+    for (let i = startSkip; i < overlap; i += step) {
         const a = prev[base + i], b = next[i];
         if (isNaN(a) !== isNaN(b)) return false;
         if (!isNaN(a) && Math.abs(a - b) > 1e-6) return false;
@@ -348,16 +391,37 @@ function recOverlapMatches(prev, next, shift) {
     return true;
 }
 
-// Searches outward from the shift the timestamps predict; the first exact match wins. A
-// timestamp cannot be trusted to the sample, and a periodic signal cannot be aligned by
-// content alone, so neither is used without the other.
-function recFindOverlapShift(prev, next, expected) {
-    const span = Math.max(4, Math.round(next.length * 0.05));
-    for (let d = 0; d <= span; d++) {
-        const candidates = (d === 0) ? [expected] : [expected - d, expected + d];
-        for (let c = 0; c < candidates.length; c++) {
-            const k = candidates[c];
-            if (k > 0 && k <= next.length && recOverlapMatches(prev, next, k)) return k;
+// Searches outward from the shift the timestamps predict; the first match wins. A timestamp
+// cannot be trusted to the sample, and a periodic signal cannot be aligned by content alone,
+// so neither is used without the other.
+//
+// An exact match is tried before any tolerance, so a clean pair is recognised as clean and
+// no allowance is spent that the data does not call for. Only when that fails are the two
+// known hazards allowed: an unsettled tail of up to `maxSlack`, and the one-sample offset
+// trimWaveArray() can introduce. The allowance is capped against the overlap so short reads
+// keep enough to compare.
+function recFindOverlapShift(prev, next, expected, maxSlack) {
+    // The shift that makes prev a prefix of next is tried alongside the timestamp's guess.
+    // While the screen fills, the count grows by a varying amount either side of the average
+    // - 128, 192, 160 repeating in one measured cycle - so a narrow window around the
+    // average misses two reads in every three.
+    const prefixShift = next.length - prev.length;
+    const span = Math.max(64, Math.round(next.length * 0.05));
+    const slack = Math.min(maxSlack || 0, Math.floor(next.length / 8));
+    const attempts = [[0, 0], [0, 1]];
+    if (slack > 0) attempts.push([slack, 0], [slack, 1]);
+    for (let t = 0; t < attempts.length; t++) {
+        const seeds = (prefixShift > 0 && prefixShift !== expected)
+            ? [expected, prefixShift] : [expected];
+        for (let sdx = 0; sdx < seeds.length; sdx++) {
+            for (let d = 0; d <= span; d++) {
+                const candidates = (d === 0) ? [seeds[sdx]] : [seeds[sdx] - d, seeds[sdx] + d];
+                for (let c = 0; c < candidates.length; c++) {
+                    const k = candidates[c];
+                    if (k <= 0 || k > next.length) continue;
+                    if (recOverlapMatches(prev, next, k, attempts[t][0], attempts[t][1])) return k;
+                }
+            }
         }
     }
     return -1;
@@ -365,10 +429,10 @@ function recFindOverlapShift(prev, next, expected) {
 
 function stitchRollingFrames(frames, sampleRate) {
     if (!recordStitchRollingFrames || frames.length < 2) {
-        return { frames: frames, stitched: 0, dropped: 0 };
+        return { frames: frames, stitched: 0, dropped: 0, trimmed: 0 };
     }
     const out = [];
-    let stitched = 0, dropped = 0;
+    let stitched = 0, dropped = 0, worstFrontier = 0;
     for (let i = 0; i < frames.length; i++) {
         const cur = frames[i];
         const prev = out.length ? out[out.length - 1] : null;
@@ -379,23 +443,82 @@ function stitchRollingFrames(frames, sampleRate) {
             continue;
         }
         const a = prev.ch1 || [], b = cur.ch1 || [];
-        // Predict from the time since the last read that was folded in, not since the start.
+        // Start from what this cycle has already shown, with a modest ceiling until it has
+        // shown anything. An exact match is always attempted first, so this is only spent
+        // on pairs that genuinely need it.
+        const slack = Math.max(worstFrontier, 32);
         const dtMs = (cur.s.t || 0) - (prev.tLast || 0);
-        let shift = recFindOverlapShift(a, b, Math.round(dtMs / 1000 * sampleRate));
+        let shift = recFindOverlapShift(a, b, Math.round(dtMs / 1000 * sampleRate), slack);
         if (shift < 0 && b.length > a.length) {
-            shift = recOverlapMatches(a, b, b.length - a.length) ? b.length - a.length : -1;
+            const k = b.length - a.length;
+            const cap = Math.min(slack, Math.floor(b.length / 8));
+            if (recOverlapMatches(a, b, k, 0, 0) || recOverlapMatches(a, b, k, 0, 1) ||
+                (cap > 0 && (recOverlapMatches(a, b, k, cap, 0) || recOverlapMatches(a, b, k, cap, 1)))) {
+                shift = k;
+            }
         }
         if (shift > 0) {
-            const subsumed = (a.length <= b.length - shift + 0); // prev was wholly a prefix
-            prev.ch1 = a.concat(b.slice(b.length - shift));
-            if (prev.ch2 && cur.ch2) prev.ch2 = prev.ch2.concat(cur.ch2.slice(cur.ch2.length - shift));
+            const f = recFrontierSize(a, b, shift);
+            if (f > worstFrontier && f < a.length / 4) worstFrontier = f;
+            const overlapLen = b.length - shift;
+            const subsumed = (a.length <= overlapLen);
+            // The newer read is authoritative wherever the two overlap - it is the one that
+            // corrected the older read's unsettled tail - so keep only what precedes the
+            // overlap and take the rest from it.
+            prev.ch1 = a.slice(0, Math.max(0, a.length - overlapLen)).concat(b);
+            if (prev.ch2 && cur.ch2) {
+                const ov2 = cur.ch2.length - shift;
+                prev.ch2 = prev.ch2.slice(0, Math.max(0, prev.ch2.length - ov2)).concat(cur.ch2);
+            }
             prev.tLast = cur.s.t;
             if (subsumed) dropped++; else stitched++;
             continue;
         }
         out.push({ ch1: cur.ch1, ch2: cur.ch2, s: cur.s, tLast: cur.s ? cur.s.t : 0 });
     }
-    return { frames: out, stitched: stitched, dropped: dropped };
+
+    // The last read of a cycle has no successor, so its own tail was never corrected. Trim it
+    // by the largest frontier this cycle actually showed; if none was seen, leave it alone and
+    // let the sidecar say the tail is unverified.
+    let trimmed = 0;
+    if (worstFrontier > 0 && out.length) {
+        const last = out[out.length - 1];
+        if (last.ch1 && last.ch1.length > worstFrontier * 4) {
+            last.ch1 = last.ch1.slice(0, last.ch1.length - worstFrontier);
+            if (last.ch2 && last.ch2.length > worstFrontier) {
+                last.ch2 = last.ch2.slice(0, last.ch2.length - worstFrontier);
+            }
+            trimmed = worstFrontier;
+        }
+    }
+    return { frames: out, stitched: stitched, dropped: dropped, trimmed: trimmed };
+}
+
+// Groups consecutive frames by acquisition setting rather than by samplerate.
+//
+// Stitching has to happen before the rate split, not after: partial reads of a filling
+// buffer differ in length and therefore in rate, so splitting first puts every one of them
+// in a run of its own and the stitcher never sees a pair to join.
+function groupByAcquisition(frames) {
+    const runs = [];
+    for (let i = 0; i < frames.length; i++) {
+        const s = frames[i].s;
+        const key = s ? (s.src + "@" + s.tpd) : "?";
+        if (!runs.length || runs[runs.length - 1].key !== key) runs.push({ key: key, frames: [] });
+        runs[runs.length - 1].frames.push(frames[i]);
+    }
+    return runs;
+}
+
+// The rate of the underlying acquisition for a group, taken from its fullest read - during
+// the filling phase a frame is short only because the buffer has not caught up yet.
+function recGroupSampleRate(frames) {
+    let longest = 0, s = null;
+    for (let i = 0; i < frames.length; i++) {
+        const n = (frames[i].ch1 || []).length;
+        if (n > longest) { longest = n; s = frames[i].s; }
+    }
+    return recFrameSampleRate(s, longest);
 }
 
 // Splits the captured frames into runs of constant samplerate.
@@ -486,6 +609,35 @@ function buildRecordingSegment(frames, sampleRate, segIndex, segCount, stamp) {
         log("NOTE: " + warnings[warnings.length - 1] + " A frame spans 12 x time/div of signal, " +
             "which at slow timebases can exceed the interval between acquisitions.");
     }
+    // A frame carrying NaN among real readings is a mismatched channel pair, not dead time.
+    // In single-channel mode DataBuffer2 interleaves CH2's and CH1's samples to double the
+    // rate, indexing both by CH1's count; if CH2's data is shorter, parseInt('', 16) yields
+    // NaN for the CH2-derived positions of the tail. The app guards the case where CH2 is
+    // entirely absent but not this one, so such a frame reaches the export looking like
+    // absent data. NaN means "no acquisition here" in this file, so say otherwise here.
+    let holed = 0;
+    timeline.plan.forEach((p) => {
+        const src = p.frame.ch1 || [];
+        let seenValue = false, seenGap = false;
+        for (let i = 0; i < src.length; i++) {
+            if (isNaN(src[i])) seenGap = true; else seenValue = true;
+        }
+        if (seenValue && seenGap) holed++;
+    });
+    if (holed > 0) {
+        warnings.push(holed + " frame(s) contain NaN among real readings. That is a mismatched " +
+            "CH1/CH2 pair rather than dead time - in single-channel mode the two are interleaved " +
+            "and a short CH2 leaves gaps in its half of the tail - so those samples are missing " +
+            "data, not an interval when nothing was acquired.");
+        log("WARNING: " + warnings[warnings.length - 1]);
+    }
+    if (sampleRate < 1) {
+        warnings.push("The frames here work out below 1 Sa/s (" + sampleRate.toFixed(4) + "), " +
+            "which a .sr cannot express - its samplerate is a whole number of Hz - so the file " +
+            "says 1 Hz and its timeline is stretched by that much. A very slow time/div read " +
+            "before the acquisition filled produces this.");
+        log("WARNING: " + warnings[warnings.length - 1]);
+    }
     if (segCount > 1 && frames.length === 1) {
         warnings.push("This file holds a single frame. The recording needed more samples than " +
             recordMaxTimelineSamples + " per channel to place its frames on one timeline, so each " +
@@ -574,11 +726,11 @@ function exportRecordingSR() {
             "signal source mid-recording can yield one of these.");
     }
 
-    // Stitch per samplerate run, since the shift is predicted from that run's rate.
+    // Stitch per acquisition setting, before any rate split - see groupByAcquisition().
     let frames = [];
     let stitched = 0, prefixes = 0;
-    splitRecordingBySamplerate(recordedFrames).forEach((run) => {
-        const r = stitchRollingFrames(run.frames, run.sampleRate);
+    groupByAcquisition(recordedFrames).forEach((run) => {
+        const r = stitchRollingFrames(run.frames, recGroupSampleRate(run.frames));
         stitched += r.stitched; prefixes += r.dropped;
         frames = frames.concat(r.frames);
     });
