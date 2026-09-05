@@ -774,7 +774,7 @@ class TestPartialReadSampleRate(unittest.TestCase):
     def _rates(self, intended):
         harness = recording_source() + (
             "\n__emit(JSON.stringify(%s.map(function (n) {\n"
-            "  return recFrameSampleRate({tpd: %s, intended: %s}, n); })));\n"
+            "  return recFrameSampleRate({tpd: %s, full: %s}, n); })));\n"
             % (json.dumps(self.READS), self.TPD, json.dumps(intended))
         )
         return run_js_json(harness)
@@ -800,7 +800,7 @@ class TestPartialReadSampleRate(unittest.TestCase):
         """Outside roll mode length equals intended, so the rule is unchanged."""
         harness = recording_source() + (
             "\n__emit(JSON.stringify([\n"
-            "  recFrameSampleRate({tpd: 0.005, intended: 2401}, 2401),\n"
+            "  recFrameSampleRate({tpd: 0.005, full: 2401}, 2401),\n"
             "  recFrameSampleRate({tpd: 0.005}, 2401)]));\n"
         )
         with_intended, without = run_js_json(harness)
@@ -813,7 +813,7 @@ class TestPartialReadSampleRate(unittest.TestCase):
         harness = recording_source() + (
             "\nvar frames = %s.map(function (n) {\n"
             "  return {ch1: new Array(n).fill(0.25), ch2: null,\n"
-            "          s: {t: 0, tpd: %s, len: n, intended: %d, src: 'DataBuffer2'}}; });\n"
+            "          s: {t: 0, tpd: %s, len: n, full: %d, src: 'DataBuffer2'}}; });\n"
             "__emit(JSON.stringify(splitRecordingBySamplerate(frames).length));\n"
             % (json.dumps(self.READS), self.TPD, self.FULL)
         )
@@ -842,7 +842,7 @@ class TestUnsettledTail(unittest.TestCase):
             "  var a = truth.slice(0, n);\n"
             "  for (var j = Math.max(0, n - %d); j < n; j++) a[j] = 2.44;  // unsettled: flat\n"
             "  return {ch1: a, ch2: null,\n"
-            "          s: {t: idx * 200, tpd: 0.5, len: n, intended: 4801, src: 'DataBuffer2'}};\n"
+            "          s: {t: idx * 200, tpd: 0.5, len: n, full: 4801, src: 'DataBuffer2'}};\n"
             "});\n" % (period, high, json.dumps(lengths), frontier)
         )
 
@@ -901,7 +901,7 @@ class TestUnsettledTail(unittest.TestCase):
             "  var a = truth.slice(0, n);\n"
             "  if (n === 480) a = [a[0]].concat(a);      // the spurious centring pad\n"
             "  return {ch1: a, ch2: null,\n"
-            "          s: {t: idx * 200, tpd: 0.5, len: a.length, intended: 4801, src: 'DataBuffer2'}};\n"
+            "          s: {t: idx * 200, tpd: 0.5, len: a.length, full: 4801, src: 'DataBuffer2'}};\n"
             "});\n"
             "var r = stitchRollingFrames(frames, recGroupSampleRate(frames));\n"
             "__emit(JSON.stringify({frames: r.frames.length}));\n"
@@ -915,7 +915,7 @@ class TestUnsettledTail(unittest.TestCase):
             "\nvar truth = []; for (var i = 0; i < 5000; i++) truth.push((i % 8) < 6 ? 2.44 : 0.0);\n"
             "var frames = [0, 1].map(function (idx) {\n"
             "  return {ch1: truth.slice(0, 2401), ch2: null,\n"
-            "          s: {t: idx * 200, tpd: 0.005, len: 2401, intended: 2401, src: 'DataBuffer'}};\n"
+            "          s: {t: idx * 200, tpd: 0.005, len: 2401, full: 2401, src: 'DataBuffer'}};\n"
             "});\n"
             "var r = stitchRollingFrames(frames, recGroupSampleRate(frames));\n"
             "__emit(JSON.stringify({trimmed: r.trimmed,\n"
@@ -943,7 +943,7 @@ class TestHoledFrameWarning(unittest.TestCase):
             "showMessage = function () {}; downloadRecordingBlob = function () {};\n"
             "buildRecordingSegment([{ch1: %s, ch2: null,\n"
             "  s: {t: 0, sr: 40000, tpd: 0.005, len: 8, trigIdx: 4, src: 'DataBuffer2',\n"
-            "      intended: 8, demo: false, acq: 'Sample',\n"
+            "      full: 8, demo: false, acq: 'Sample',\n"
             "      ch1: {vpd: 0.5, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
             "      ch2: {on: false, vpd: 1, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
             "      trig: {src: 'CH1', mode: 'Auto', edge: 'rising', level: 1}}}],\n"
@@ -971,7 +971,7 @@ class TestHoledFrameWarning(unittest.TestCase):
             "downloadRecordingBlob = function () {};\n"
             "var mk = function (t) { return {ch1: [0.2, 0.3, 0.2, 0.3, 0.2, 0.3, 0.2, 0.3],\n"
             "  ch2: null, s: {t: t, sr: 40000, tpd: 0.005, len: 8, trigIdx: 4,\n"
-            "    src: 'DataBuffer2', intended: 8, demo: false, acq: 'Sample',\n"
+            "    src: 'DataBuffer2', full: 8, demo: false, acq: 'Sample',\n"
             "    ch1: {vpd: 0.5, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
             "    ch2: {on: false, vpd: 1, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
             "    trig: {src: 'CH1', mode: 'Auto', edge: 'rising', level: 1}}}; };\n"
@@ -983,3 +983,53 @@ class TestHoledFrameWarning(unittest.TestCase):
         r = run_js_json(harness)
         self.assertGreater(r["gap"], 0, "the two frames should be separated by dead time")
         self.assertFalse(any("mismatched" in x for x in r["w"]))
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestRateDenominatorIsSourceAware(unittest.TestCase):
+    """A frame's rate divides by what a COMPLETE frame from *that source* holds.
+
+    For a raw source that is the acquisition length, so a partial read still carries its
+    acquisition's rate. A `WAV` frame is the instrument's rendered screen — a fixed 300
+    points at every timebase, never partial — so its own length is the right count.
+    `appParam_intendedSamples` counts raw samples a WAV frame never contains, and using it
+    made WAV frames up to sixteen times too fast, compressing them to a fraction of the
+    twelve divisions they actually span.
+    """
+
+    def _span(self, length, full, tpd):
+        harness = recording_source() + (
+            "\nvar r = recFrameSampleRate({tpd: %s, full: %s}, %d);\n"
+            "__emit(JSON.stringify({rate: r, span: (%d - 1) / r}));\n"
+            % (tpd, json.dumps(full), length, length)
+        )
+        return run_js_json(harness)
+
+    def test_a_wav_frame_spans_twelve_divisions(self):
+        """300 rendered points across the screen, whatever the timebase."""
+        for tpd in (2e-8, 5e-6, 0.5):
+            r = self._span(300, 300, tpd)
+            self.assertAlmostEqual(r["span"], 12 * tpd, delta=12 * tpd * 0.01,
+                                   msg="WAV frame at %s s/div spans %.3g s, want %.3g s"
+                                       % (tpd, r["span"], 12 * tpd))
+
+    def test_the_raw_acquisition_count_would_break_wav(self):
+        """Guards the regression directly: 300 points over a 2401-sample denominator."""
+        wrong = self._span(300, 2401, 2e-8)
+        right = self._span(300, 300, 2e-8)
+        self.assertGreater(right["span"] / wrong["span"], 5,
+                           "the wrong denominator should be badly off, not marginally")
+        self.assertAlmostEqual(right["span"], 12 * 2e-8, delta=1e-10)
+
+    def test_a_partial_raw_read_still_uses_its_acquisition(self):
+        """The other half of the rule, unchanged: a partial read is not its own yardstick."""
+        for length in (778, 954, 1082, 4801):
+            r = self._span(length, 4801, 0.5)
+            self.assertAlmostEqual(r["rate"], 800.0, delta=0.5)
+
+    def test_wav_and_raw_frames_of_one_screen_agree_in_duration(self):
+        """Both describe the same twelve divisions, so both must span the same time even
+        though one holds 300 points and the other 25."""
+        wav = self._span(300, 300, 2e-8)
+        raw = self._span(25, 25, 2e-8)
+        self.assertAlmostEqual(wav["span"], raw["span"], delta=1e-10)

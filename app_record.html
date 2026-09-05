@@ -7665,8 +7665,8 @@ function recShowMessage(text) {
 // 22 Hz across three consecutive partial reads of the same acquisition.
 function recFrameSampleRate(s, length) {
     const tpd = (s && isFinite(s.tpd) && s.tpd > 0) ? s.tpd : 1;
-    const intended = (s && isFinite(s.intended) && s.intended >= 2) ? s.intended : length;
-    return (Math.max(2, intended) - 1) / (12 * tpd);
+    const full = (s && isFinite(s.full) && s.full >= 2) ? s.full : length;
+    return (Math.max(2, full) - 1) / (12 * tpd);
 }
 
 // Captures the acquisition settings in force for the frame currently being snapshotted.
@@ -7681,7 +7681,14 @@ function recSnapshotSettings() {
         len: len,
         trigIdx: Math.max(0, Math.min(len - 1, Math.round(appParam_timeOffset * (len - 1)))),
         src: appParam_GeneralSignalSource,
-        intended: appParam_intendedSamples, // the real acquisition length, which WAV hides
+        intended: appParam_intendedSamples, // the raw acquisition length, which WAV hides
+        // How many samples a COMPLETE frame from this source holds - the denominator of the
+        // rate. For a raw source that is the acquisition length, so a partial read still gets
+        // its acquisition's rate. A WAV frame is the instrument's rendered screen, always a
+        // full 300 points and never partial, so its own length is the right count;
+        // appParam_intendedSamples counts raw samples it never contains and would make the
+        // rate up to sixteen times too high.
+        full: (appParam_GeneralSignalSource == "WAV") ? CH1rawPoints.length : appParam_intendedSamples,
         demo: (appParam_demoMode_Enabled == 'ON'),
         acq: appParam_acquisitionMode,
         ch1: { vpd: appParam_currVPD_CH1, vpos: param_CH1trueVerticalPos / 200, probe: appParam_CH1Probe, coupling: appParam_CH1Coupling, bw: appParam_CH1BWLimit },
