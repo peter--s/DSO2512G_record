@@ -107,7 +107,9 @@ sample. The sidecar flags this as `samplerate_is_display_points`, and each frame
 `intended_samples`, the real acquisition length. Record from `DataBuffer` if you want samples
 rather than the scope's rendering of them.
 
-The count is the *intended* acquisition length, not the array's length. In roll mode the
+The count is what a **complete frame from that source** holds, not the array's length. For a
+raw source that is the acquisition length; for `WAV` it is the frame's own 300 points, since
+a WAV frame is the rendered screen and is never partial. In roll mode the
 app draws a partly-filled acquisition into the right-hand part of the grid rather than
 stretching it across the width — `processForPlotting()` left-pads by
 `width − (length / intendedDrawnSamples) × width`, so pixels per sample come out as
