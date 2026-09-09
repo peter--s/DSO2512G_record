@@ -47,6 +47,14 @@
       "payload_file": "patch/functions.js"
     }
   ],
+  "app_fix_ops": [
+    {
+      "name": "fw_version",
+      "description": "accept firmware 'V9B3 or newer' instead of an exact match (needed for V9B5+)",
+      "anchor": "        const validVersions = [\"V1.3.0C MOD V9B3\", \"V1.3.0C MOD V9B4\"];\n        for (var i = 0; i < validVersions.length; i++) {\n            if (versionData == validVersions[i]) {\n                appParam_isFirmwareVersionValid = 1;\n            }\n        }",
+      "payload_file": "patch/firmware_version.js"
+    }
+  ],
   "record_button_lines": [
     "<button class=\"control-button button-big-power\" id=\"button-record\" onclick=\"toggleRecording()\" style=\"left: 300px; top: 0px;\" disabled=\"\">",
     " RECORD",

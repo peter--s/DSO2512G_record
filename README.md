@@ -322,7 +322,25 @@ python3 apply_record_feature.py single --dir /path/to/project
 
 # Optional: skip adding favicon.ico to the html header
 python3 apply_record_feature.py single --noicon
+
+# Optional: also apply fixes to the app itself (see --help for the numbered list)
+python3 apply_record_feature.py single --with-app-fixes
+python3 apply_record_feature.py single --with-app-fixes=fw_version   # or =1
 ```
+
+### App fixes (optional, off by default)
+
+Separate from the recorder, `record_feature.patch.json` carries an `app_fix_ops` list of fixes
+to defects in the app itself. They are **not applied unless asked for**, so the default build is
+the recorder and nothing else — which keeps it reviewable, and proposable upstream, on its own.
+`--help` lists them numbered; `--with-app-fixes` takes either the bare flag (all of them) or a
+comma-separated list of numbers and/or names.
+
+Currently one:
+
+| # | name | fix |
+|---|---|---|
+| 1 | `fw_version` | The app tests the firmware reply with **exact string equality** against `V9B3`/`V9B4`, so any *newer* modded firmware is rejected — and the app then calls `stopPlotting()`, refusing to run at all — even though its own on-screen message says "or newer". This accepts `V1.3.0C MOD V9Bn` for n ≥ 3, tolerates the untrimmed reply (`versionData` is `response.slice(4)` with no `trim()`), and logs the version, which the app otherwise never does. Needed for firmware V9B5 and above. |
 
 Notes:
 - **Runtime assets:** keep `oscilloscope_custom.ttf` and `favicon.ico` next to the HTML.
