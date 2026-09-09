@@ -6,7 +6,7 @@
         // versionData is also used untrimmed, so a trailing CR alone would fail the comparison.
         // Runs before the "not compatible" branch below, so accepting here suppresses it.
         log("Received: Firmware [" + versionData + "]");
-        const FW_MIN_MOD = 3;
+        const FW_MIN_MOD = 5;
         const fwText = String(versionData).trim();
         // The base version is checked here rather than relying on parseResponseBuffer() only
         // resolving on a 'V1.3.0C' prefix: this branch should stand on its own, so a different

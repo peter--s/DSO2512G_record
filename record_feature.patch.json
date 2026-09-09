@@ -13,12 +13,12 @@
     },
     {
       "name": "snapshot_ch1",
-      "anchor": "appParam_sampleRate = appParam_sampleRate > 100000000 ? 100000000 : appParam_sampleRate;\n            }\n        }",
+      "anchor": "        currentCH1DataArray = trimWaveArray(currentCH1DataArray, 'CH1');",
       "payload_file": "patch/snapshot_ch1.js"
     },
     {
       "name": "snapshot_ch2",
-      "anchor": "CH2rawPoints = generateWaveformData(appParam_demoMode_CH2shape, parseFloat(appParam_demoMode_CH2noise), parseInt(appParam_demoMode_CH2cycles), parseFloat(appParam_demoMode_CH2amplitude), parseInt(appParam_demoMode_CH2phase), parseInt(appParam_demoMode_CH2samples));\n            }",
+      "anchor": "            currentCH2DataArray = trimWaveArray(currentCH2DataArray, 'CH2');",
       "payload_file": "patch/snapshot_ch2.js"
     },
     {
@@ -28,12 +28,12 @@
     },
     {
       "name": "enable_button",
-      "anchor": "document.getElementById('button-power').textContent = \"STOP\";",
+      "anchor": "        plotGrid(1);\n        startPlotting();",
       "payload_file": "patch/enable_button.js"
     },
     {
       "name": "disable_button",
-      "anchor": "document.getElementById('button-power').textContent = \"START\";",
+      "anchor": "        clearInterval(iterateInterval);\n        iterateInterval = null;\n        stopPlotting();",
       "payload_file": "patch/disable_button.js"
     },
     {
@@ -43,35 +43,38 @@
     },
     {
       "name": "functions",
-      "anchor": "iterateInterval = setInterval(doIteration, 100);\n    }\n}",
+      "anchor": "iterateInterval = setInterval(doIteration, ITERATION_INTERVAL);\n    }\n}",
       "payload_file": "patch/functions.js"
     }
   ],
   "app_fix_ops": [
     {
       "name": "fw_version",
-      "description": "accept firmware 'V9B3 or newer' instead of an exact match (needed for V9B5+)",
-      "anchor": "        const validVersions = [\"V1.3.0C MOD V9B3\", \"V1.3.0C MOD V9B4\"];\n        for (var i = 0; i < validVersions.length; i++) {\n            if (versionData == validVersions[i]) {\n                appParam_isFirmwareVersionValid = 1;\n            }\n        }",
+      "description": "accept firmware 'V9B5 or newer' instead of an exact match (needed for V9B6+)",
+      "anchor": "        const validVersions = [\"V1.3.0C MOD V9B5\"]; // right now only V9B5 supports booting into USB Serial mode.\n        for (var i = 0; i < validVersions.length; i++) {\n            if (versionData == validVersions[i]) {\n                appParam_isFirmwareVersionValid = 1;\n            }\n        }",
       "payload_file": "patch/firmware_version.js"
     }
   ],
-  "record_button_lines": [
-    "<button class=\"control-button button-big-power\" id=\"button-record\" onclick=\"toggleRecording()\" style=\"left: 300px; top: 0px;\" disabled=\"\">",
-    " RECORD",
-    "</button>"
-  ],
-  "button_anchor_id": "button-power",
   "record_marker": "id=\"button-record\"",
   "js_marker": "appParam_isRecording",
   "jszip": {
     "vendor_file": "jszip.min.js",
     "script_id": "jszip-lib",
     "comment": "<!-- Bundled JSZip 3.10.1 (inline, for offline .sr / PulseView export) -->",
-    "src_ref": "<script src=\"jszip.min.js\"></script>"
+    "src_ref": "<script src=\"jszip.min.js\"></script>",
+    "marker": "\n  <script>\n"
   },
   "favicon": {
     "file": "favicon.ico",
     "link": "<link rel=\"icon\" href=\"favicon.ico\"/>",
     "marker": "rel=\"icon\""
-  }
+  },
+  "html_ops": [
+    {
+      "name": "record_button",
+      "target": "html",
+      "anchor": "    <button class=\"button-small-control-2\" onclick=\"menuButton9()\" style=\"left: 10px; top: 730px;\">\n     BACK\n    </button>",
+      "payload_file": "patch/record_button.js"
+    }
+  ]
 }

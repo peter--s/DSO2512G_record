@@ -53,15 +53,15 @@ function recShowMessage(text) {
 
 // Samples per second for one frame, using the app's own rule.
 //
-// The app never derives time from appParam_sampleRate - that is the top-bar readout, clamped
-// to the hardware ceiling for WAV so it stays sane, and building the export on it stretched
-// WAV frames by 12.5x. Everywhere the app actually needs time it divides 12 * tpd by the
-// sample count, so a complete frame occupies exactly its twelve divisions.
+// The app now agrees: appParam_sampleRate is
+//     (table_timeZoomSamples[lvl] / dualChanDiv) / 12 / currTPD
+// which is algebraically this same rule, so a complete frame occupies exactly its twelve
+// divisions. (It was derived from the array's own length in older app versions, and clamped,
+// which is what this function was written to work around.)
 //
-// The count that matters is the INTENDED one, not the array's length. In roll mode the app
-// draws a partly-filled acquisition into the right-hand part of the grid rather than
-// stretching it across the whole width - processForPlotting() left-pads by
-//     width - (length / intendedDrawnSamples) * width
+// The count that matters is still the INTENDED one, not the array's length. In roll mode the
+// app draws a partly-filled acquisition into the right-hand part of the grid rather than
+// stretching it across the whole width - processForPlotting() left-pads it -
 // so its pixels-per-sample works out to width / intendedSamples whatever the fill level.
 // Time per sample is therefore constant while the buffer fills, which is why the display
 // stays correct. Using the array length instead made one 100 Hz signal read as 16, 20 and
@@ -72,35 +72,49 @@ function recFrameSampleRate(s, length) {
     return (Math.max(2, full) - 1) / (12 * tpd);
 }
 
-// Captures the acquisition settings in force for the frame currently being snapshotted.
-// processParams() runs before processWaveforms() in doIteration(), and PRM/CH1/CH2 arrive in the
-// same #WAV2 response, so these values belong to THIS frame's samples rather than a neighbour's.
-function recSnapshotSettings() {
-    const len = CH1rawPoints.length;
+// Captures the acquisition settings in force for the frame currently being committed.
+// processParams() runs before processWaveforms() in doIteration(), and CH1/CH2 arrive in the same
+// FPGA read, so these values belong to THIS frame's samples rather than a neighbour's.
+function recSnapshotSettings(len) {
+    // Interpolation inserts synthetic points before the trim, so a 'displayed' frame is
+    // interpScale times longer than the acquisition and its samples arrive interpScale times
+    // faster. 'acquired' frames are captured with interpolation forced off, so the factor is 1.
+    const interp = (recCaptureMode === 'displayed' && isFinite(appParam_interpScale)) ? appParam_interpScale : 1;
     return {
         t: recPendingTime,                  // performance.now() when the frame was detected
-        sr: appParam_sampleRate,            // Sa/s for this frame
+        sr: appParam_sampleRate * interp,   // Sa/s for this frame, as captured
         tpd: appParam_currTPD,              // s/div
         len: len,
         trigIdx: Math.max(0, Math.min(len - 1, Math.round(appParam_timeOffset * (len - 1)))),
-        src: appParam_GeneralSignalSource,
-        intended: appParam_intendedSamples, // the raw acquisition length, which WAV hides
-        // How many samples a COMPLETE frame from this source holds - the denominator of the
-        // rate. For a raw source that is the acquisition length, so a partial read still gets
-        // its acquisition's rate. A WAV frame is the instrument's rendered screen, always a
-        // full 300 points and never partial, so its own length is the right count;
-        // appParam_intendedSamples counts raw samples it never contains and would make the
-        // rate up to sixteen times too high.
-        full: (appParam_GeneralSignalSource == "WAV") ? CH1rawPoints.length : appParam_intendedSamples,
-        demo: (appParam_demoMode_Enabled == 'ON'),
+        // What the samples mean, and the grouping key: changing it mid-recording changes the
+        // meaning of the numbers, so it must split a segment exactly as a rate change does.
+        src: recCaptureMode,
+        intended: appParam_intendedSamples,
+        // How many samples a COMPLETE frame holds - the denominator of the rate - so that a
+        // partial read still gets its acquisition's rate rather than one derived from its own
+        // truncated length. Scaled with interpolation for the same reason as sr.
+        full: appParam_intendedSamples * interp,
+        interpScale: interp,
         acq: appParam_acquisitionMode,
-        ch1: { vpd: appParam_currVPD_CH1, vpos: param_CH1trueVerticalPos / 200, probe: appParam_CH1Probe, coupling: appParam_CH1Coupling, bw: appParam_CH1BWLimit },
-        ch2: { on: (param_CH2enabled === 1), vpd: appParam_currVPD_CH2, vpos: param_CH2trueVerticalPos / 200, probe: appParam_CH2Probe, coupling: appParam_CH2Coupling, bw: appParam_CH2BWLimit },
+        // Display processing that was active. None of it applies to an 'acquired' capture
+        // except the low-pass filter, which runs upstream of the snapshot point either way.
+        proc: {
+            interpolation: appParam_Interpolation,
+            ch1_lpf: appParam_CH1_LPF, ch2_lpf: appParam_CH2_LPF,
+            stabilize: appParam_triggerStabilize
+        },
+        // vpos is where this channel's 0 V sits in the captured array, which depends on WHERE the
+        // capture was taken. applyOffset() adds appParam_CHnOffset absolutely, and it runs after
+        // the snapshot point but before CH1rawPoints is final - so a 'displayed' frame carries the
+        // vertical position and must have it subtracted back out, while an 'acquired' frame never
+        // received it and is already referenced to ground.
+        ch1: { vpd: appParam_currVPD_CH1, vpos: (recCaptureMode === 'displayed' ? appParam_CH1Offset : 0), probe: appParam_CH1Probe, coupling: appParam_CH1Coupling, lpf: appParam_CH1_LPF },
+        ch2: { on: (appParam_CH2Enabled == 'ON'), vpd: appParam_currVPD_CH2, vpos: (recCaptureMode === 'displayed' ? appParam_CH2Offset : 0), probe: appParam_CH2Probe, coupling: appParam_CH2Coupling, lpf: appParam_CH2_LPF },
         trig: {
-            src: (param_triggerCH1CH2 == 0 ? 'CH1' : 'CH2'),
+            src: (appParam_triggerSource == 0 ? 'CH1' : 'CH2'),
             mode: appParam_triggerMode,
-            edge: (param_triggerEdge == 0 ? 'rising' : 'falling'),
-            level: findTriggerVolts(param_triggerCH1CH2 == 0 ? appParam_currVPD_CH1 : appParam_currVPD_CH2)
+            edge: (appParam_triggerEdge == 0 ? 'rising' : 'falling'),
+            level: findTriggerVolts(appParam_triggerSource == 0 ? appParam_currVPD_CH1 : appParam_currVPD_CH2)
         }
     };
 }
@@ -111,14 +125,10 @@ function recSnapshotSettings() {
 // subtracting it re-references the samples to ground before scaling. Mirrors the app's own
 // calcMeas() ("scaleFactor = 8 * voltsPerDivision") and findTriggerVolts() ("value * 8 * voltsPerDivision").
 //
-// vPosNorm comes from param_CHntrueVerticalPos, not param_CHnverticalPos: the latter is clamped to
-// [29, 227] so the on-screen ground arrow stays inside the grid, which is wrong past +/-4 divisions.
-//
-// No applyOffset() correction is needed here. Its RUN-mode delta is
-// (param_CH1trueVerticalPos - last_param_CH1trueVerticalPos), and trackBufferChangeTime() assigns
-// last_param_CH1trueVerticalPos = param_CH1trueVerticalPos in the very block that raises
-// appParam_bufferUpdated - so on exactly the frames we record that delta is zero. applyOffset only
-// drags a stale frame to follow the position knob between acquisitions.
+// vPosNorm comes from appParam_CHnOffset, not appParam_CHnVerticalPos: the latter is clamped to
+// +/-0.495 so the on-screen ground arrow stays inside the grid, which is wrong past +/-4 divisions.
+// recSnapshotSettings() passes 0 for an 'acquired' capture, which is taken before applyOffset()
+// and is therefore already referenced to ground; see the note there.
 function recToVolts(samples, voltsPerDiv, vPosNorm) {
     const vpd = (typeof voltsPerDiv === 'number' && isFinite(voltsPerDiv)) ? voltsPerDiv : 1; // getVoltsDiv() returns undefined out of range
     const pos = isFinite(vPosNorm) ? vPosNorm : 0;
@@ -253,14 +263,17 @@ function recordingTimestamp() {
 function buildRecordingSidecar(timeline, ch2Enabled, warnings, segIndex, segCount, sampleRate) {
     const chan = (nth, name) => ({ name: name, entry_base: recordAnalogBase(nth), unit: "V" });
     const chanSettings = (cfg) => ({
-        vpd: cfg.vpd, vpos: cfg.vpos, probe: cfg.probe, coupling: cfg.coupling, bwlimit: cfg.bw
+        vpd: cfg.vpd, vpos: cfg.vpos, probe: cfg.probe, coupling: cfg.coupling, lpf: cfg.lpf
     });
 
-    const sources = [];
+    // Which capture modes appear here. Normally one: the mode is fixed when RECORD is pressed
+    // and is a grouping key, so a change starts a new segment rather than mixing meanings.
+    const modes = [];
     timeline.plan.forEach((p) => {
-        const src = (p.frame.s || {}).src;
-        if (src && sources.indexOf(src) === -1) sources.push(src);
+        const m = (p.frame.s || {}).src;
+        if (m && modes.indexOf(m) === -1) modes.push(m);
     });
+    const anyDisplayed = modes.indexOf("displayed") !== -1;
 
     const frames = timeline.plan.map((p, i) => {
         const s = p.frame.s || {};
@@ -272,7 +285,8 @@ function buildRecordingSidecar(timeline, ch2Enabled, warnings, segIndex, segCoun
             t_ms: s.t !== undefined ? (s.t - timeline.t0) : null,
             trigger_sample: s.trigIdx !== undefined ? s.trigIdx : null,
             samplerate: s.sr, tpd: s.tpd, intended_samples: s.intended,
-            signal_source: s.src, demo: s.demo, acquisition_mode: s.acq
+            capture_mode: s.src, acquisition_mode: s.acq,
+            interp_scale: s.interpScale, display_processing: s.proc
         };
         if (s.ch1) out.ch1 = chanSettings(s.ch1);
         if (s.ch2) {
@@ -299,13 +313,12 @@ function buildRecordingSidecar(timeline, ch2Enabled, warnings, segIndex, segCoun
         samplerate: Math.round(sampleRate),
         samplerate_exact: sampleRate,
         samplerate_string: formatSamplerate(sampleRate),
-        // A WAV frame is the instrument's rendered screen trace: a fixed 300 points whatever
-        // the time/div, "already processed and interpolated" in the app's own words. The rate
-        // below therefore counts display points per second, not ADC samples - it is what
-        // makes the frame span its true 12 divisions, but it can exceed what the hardware can
-        // actually sample. intended_samples on each frame gives the real acquisition length.
-        samplerate_is_display_points: sources.indexOf("WAV") !== -1,
-        samplerate_estimated: sources.indexOf("WAV") !== -1,
+        // A 'displayed' capture is what the app draws, so if interpolation was on it carries
+        // synthetic points between the acquired ones and the rate counts display points per
+        // second rather than ADC samples. intended_samples on each frame gives the real
+        // acquisition length, and interp_scale the factor between them.
+        samplerate_is_display_points: anyDisplayed,
+        samplerate_estimated: false,
 
         sample_count: timeline.total,
         frame_count: frames.length,
@@ -318,18 +331,15 @@ function buildRecordingSidecar(timeline, ch2Enabled, warnings, segIndex, segCoun
             note: "Frame times are arrival timestamps, so placement is accurate to about one acquisition interval."
         },
 
-        // Baked into every sample by convertToWaveArray(), but only on the DataBuffer paths:
-        // the WAV branch negates instead and applies no offset at all. Reporting them
-        // unconditionally would assert something untrue of a WAV capture, so they appear only
-        // when some frame here actually carried them. They are deliberately not removed from
-        // the samples - they are what makes the export agree with the scope's own readouts.
-        app_calibration: sources.every((s) => s === "WAV") ? { verticalScale: verticalScale } : {
+        // Baked into every sample by convertToWaveArray(). Deliberately not removed - they are
+        // what makes the export agree with the scope's own readouts.
+        app_calibration: {
             verticalScale: verticalScale,
             verticalOffsetCH1: verticalOffsetCH1,
             verticalOffsetCH2: verticalOffsetCH2,
-            applies_to: sources.length > 1 ? "DataBuffer frames only" : "all frames"
+            applies_to: "all frames"
         },
-        signal_sources: sources,
+        capture_modes: modes,
         volts_formula: "volts = (raw - vpos) * 8 * vpd",
 
         channels: channels,
