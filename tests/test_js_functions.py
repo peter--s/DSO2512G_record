@@ -15,6 +15,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # sibling imports under -m and discover
 
+import jsengine
 from jsengine import (NO_ENGINE, find_engine, recording_source,
                       recording_source_with_zip, run_js_json)
 
@@ -1033,3 +1034,47 @@ class TestRateDenominatorIsSourceAware(unittest.TestCase):
         wav = self._span(300, 300, 2e-8)
         raw = self._span(25, 25, 2e-8)
         self.assertAlmostEqual(wav["span"], raw["span"], delta=1e-10)
+
+
+class TestFirmwareVersionFix(unittest.TestCase):
+    """The opt-in `fw_version` payload: accept the listed minimum 'or newer'.
+
+    Stock beta10 tests the reply with exact string equality against V9B3/V9B4, so any newer
+    modded firmware is rejected and the app calls stopPlotting(). These cases run the shipped
+    patch/firmware_version.js inside a reproduction of the app's own check.
+    """
+
+    def decide(self, version_data):
+        if jsengine.find_engine() is None:
+            self.skipTest(jsengine.NO_ENGINE)
+        return jsengine.run_js_json(jsengine.firmware_check_source(version_data))["valid"]
+
+    def test_listed_versions_still_accepted(self):
+        for v in ("V1.3.0C MOD V9B3", "V1.3.0C MOD V9B4"):
+            self.assertEqual(self.decide(v), 1, v)
+
+    def test_newer_firmware_accepted(self):
+        """The case the fix exists for - V9B5/V9B6 were rejected by the stock check."""
+        for v in ("V1.3.0C MOD V9B5", "V1.3.0C MOD V9B6", "V1.3.0C MOD V9B10"):
+            self.assertEqual(self.decide(v), 1, v)
+
+    def test_untrimmed_reply_accepted(self):
+        """versionData is response.slice(4) with no trim; a trailing CR alone used to fail."""
+        for v in ("V1.3.0C MOD V9B6\r", "V1.3.0C MOD V9B6 ", " V1.3.0C MOD V9B6"):
+            self.assertEqual(self.decide(v), 1, repr(v))
+
+    def test_case_insensitive(self):
+        self.assertEqual(self.decide("V1.3.0c mod v9b6"), 1)
+
+    def test_unknown_revision_format_accepted_on_prefix(self):
+        """parseResponseBuffer() only resolves on a 'V1.3.0C' prefix, so this is a real reply."""
+        self.assertEqual(self.decide("V1.3.0C MOD SOMETHING"), 1)
+
+    def test_older_firmware_still_rejected(self):
+        """The gate is loosened, not removed."""
+        for v in ("V1.3.0C MOD V9B1", "V1.3.0C MOD V9B2"):
+            self.assertEqual(self.decide(v), 0, v)
+
+    def test_non_version_replies_rejected(self):
+        for v in ("GARBAGE", "", "V2.0.0 MOD V9B6"):
+            self.assertEqual(self.decide(v), 0, repr(v))
