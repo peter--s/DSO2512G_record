@@ -131,12 +131,15 @@ class TestPatchOps(unittest.TestCase):
     def setUp(self):
         self.patch = APPLIER.load_patch(REPO)
         self.ops = self.patch["js_ops"]
+        # App fixes are opt-in and are NOT in the committed artifact, so they are checked for
+        # well-formedness and anchor uniqueness but never for presence in app_record.html.
+        self.fix_ops = self.patch.get("app_fix_ops", [])
 
     @unittest.skipIf(MISSING, NEED_INPUTS)
     def test_anchors_occur_exactly_once(self):
         """Every anchor is unambiguous in the pristine input."""
         clean = read(CLEAN)
-        for op in self.ops:
+        for op in self.ops + self.fix_ops:
             self.assertEqual(clean.count(op["anchor"]), 1,
                              "anchor for %r is not unique in app_clean.html" % op["name"])
 
@@ -174,7 +177,7 @@ class TestPatchOps(unittest.TestCase):
         if not os.path.isdir(patch_dir):
             self.skipTest("payloads are still inline in record_feature.patch.json")
         referenced = []
-        for op in self.ops:
+        for op in self.ops + self.fix_ops:
             self.assertIn("payload_file", op, "op %r has no payload_file" % op["name"])
             rel = op["payload_file"]
             path = os.path.join(REPO, rel)
@@ -185,6 +188,67 @@ class TestPatchOps(unittest.TestCase):
         on_disk = {os.path.abspath(os.path.join(patch_dir, n))
                    for n in os.listdir(patch_dir) if n.endswith(".js")}
         self.assertEqual(on_disk - set(referenced), set(), "orphan files in patch/")
+
+
+class TestAppFixSelection(unittest.TestCase):
+    """--with-app-fixes picks ops by number or name; the default build is unaffected."""
+
+    def setUp(self):
+        self.patch = APPLIER.load_patch(REPO)
+        self.fix_ops = self.patch.get("app_fix_ops", [])
+        if not self.fix_ops:
+            self.skipTest("no app_fix_ops defined")
+
+    def names(self, spec):
+        return [op["name"] for op in APPLIER.select_app_fix_ops(self.fix_ops, spec)]
+
+    def test_default_selects_nothing(self):
+        """Omitting the flag must leave the recorder-only build untouched."""
+        self.assertEqual(self.names(None), [])
+
+    def test_bare_flag_selects_all(self):
+        self.assertEqual(self.names("ALL"), [op["name"] for op in self.fix_ops])
+
+    def test_number_and_name_agree(self):
+        first = self.fix_ops[0]["name"]
+        self.assertEqual(self.names("1"), [first])
+        self.assertEqual(self.names(first), [first])
+
+    def test_duplicates_collapse_and_order_follows_the_list(self):
+        first = self.fix_ops[0]["name"]
+        self.assertEqual(self.names("1,%s,1" % first), [first])
+
+    def test_unknown_token_aborts_with_the_valid_list(self):
+        with self.assertRaises(SystemExit) as cm:
+            self.names("no-such-fix")
+        self.assertIn("no-such-fix", str(cm.exception))
+        self.assertIn(self.fix_ops[0]["name"], str(cm.exception))
+
+    def test_out_of_range_number_aborts(self):
+        with self.assertRaises(SystemExit):
+            self.names(str(len(self.fix_ops) + 1))
+
+    @unittest.skipIf(MISSING, NEED_INPUTS)
+    def test_fixed_build_differs_and_is_reproducible(self):
+        """A build with fixes differs from the plain one, and both are deterministic."""
+        def build(spec):
+            tmp = tempfile.mkdtemp(prefix="srfix-")
+            try:
+                for p in (CLEAN, JSZIP, FAVICON, PATCH_JSON):
+                    shutil.copy2(p, tmp)
+                shutil.copytree(os.path.join(REPO, "patch"), os.path.join(tmp, "patch"))
+                fixes = APPLIER.select_app_fix_ops(self.fix_ops, spec)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    APPLIER.process_single(tmp, APPLIER.load_patch(tmp), add_icon=True, app_fixes=fixes)
+                return read(os.path.join(tmp, "app_record.html"), "rb")
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+        plain, fixed = build(None), build("ALL")
+        self.assertNotEqual(plain, fixed, "--with-app-fixes did not change the output")
+        self.assertEqual(plain, read(ARTIFACT, "rb"),
+                         "the no-fixes build must still reproduce the committed artifact")
+        self.assertEqual(fixed, build("ALL"), "the fixed build is not reproducible")
 
 
 if __name__ == "__main__":

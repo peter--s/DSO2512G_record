@@ -67,16 +67,63 @@ def op_payload(op, doc_dir):
     return text[:-1] if text.endswith("\n") else text
 
 
-def apply_js_ops(text, js_ops, doc_dir):
+def apply_js_ops(text, js_ops, doc_dir, label="js"):
     """Insert each payload immediately after its (unique) anchor."""
     for op in js_ops:
         anchor, payload = op["anchor"], op_payload(op, doc_dir)
         n = text.count(anchor)
         if n != 1:
-            raise SystemExit(f"ERROR: JS anchor for '{op['name']}' found {n} times (expected 1). Aborting.")
+            raise SystemExit(f"ERROR: {label} anchor for '{op['name']}' found {n} times (expected 1). Aborting.")
         text = text.replace(anchor, anchor + payload, 1)
-        print(f"  js: applied '{op['name']}'")
+        print(f"  {label}: applied '{op['name']}'")
     return text
+
+
+def select_app_fix_ops(all_ops, spec):
+    """Resolve --with-app-fixes into the ops to apply.
+
+    App fixes correct defects in the app itself rather than adding the recorder, so they are
+    opt-in and individually selectable: the default build stays byte-identical to the recorder
+    alone. `spec` is None (none selected), "ALL" (bare flag), or a comma-separated list of
+    1-based numbers and/or op names.
+    """
+    if spec is None:
+        return []
+    if spec == "ALL":
+        return list(all_ops)
+    by_name = {op["name"]: op for op in all_ops}
+    chosen, seen = [], set()
+    for token in (t.strip() for t in spec.split(",")):
+        if not token:
+            continue
+        op = None
+        if token.isdigit():
+            i = int(token)
+            if 1 <= i <= len(all_ops):
+                op = all_ops[i - 1]
+        else:
+            op = by_name.get(token)
+        if op is None:
+            valid = ", ".join(f"{i}={o['name']}" for i, o in enumerate(all_ops, 1)) or "(none defined)"
+            raise SystemExit(f"ERROR: unknown app fix '{token}'. Valid: {valid}. Aborting.")
+        if op["name"] not in seen:
+            seen.add(op["name"])
+            chosen.append(op)
+    return chosen
+
+
+def describe_app_fixes(patch):
+    """Numbered listing of the selectable app fixes, for --help."""
+    ops = patch.get("app_fix_ops", [])
+    if not ops:
+        return ""
+    lines = ["app fixes for --with-app-fixes (default: none applied):"]
+    for i, op in enumerate(ops, 1):
+        lines.append(f"  {i}. {op['name']:<14} {op.get('description', '')}")
+    lines.append("")
+    lines.append("  --with-app-fixes            apply all of them")
+    lines.append("  --with-app-fixes=1,fw_version   apply only the listed ones (numbers or names)")
+    return "\n".join(lines)
 
 
 def apply_record_button(html, patch):
@@ -149,7 +196,7 @@ def write_output(path, text):
     print(f"  wrote: {os.path.basename(path)}")
 
 
-def process_single(doc_dir, patch, add_icon=True):
+def process_single(doc_dir, patch, add_icon=True, app_fixes=()):
     in_path = os.path.join(doc_dir, "app_clean.html")
     out_path = os.path.join(doc_dir, "app_record.html")
     if not os.path.exists(in_path):
@@ -160,6 +207,7 @@ def process_single(doc_dir, patch, add_icon=True):
         raise SystemExit("ERROR: app_clean.html already contains the RECORD feature. Aborting (nothing changed).")
     print("Building app_record.html (single, self-contained) from app_clean.html:")
     html = apply_js_ops(html, patch["js_ops"], doc_dir)
+    html = apply_js_ops(html, app_fixes, doc_dir, label="fix")
     html = apply_record_button(html, patch)
     html = inline_jszip(html, doc_dir, patch)
     if add_icon:
@@ -168,7 +216,7 @@ def process_single(doc_dir, patch, add_icon=True):
     print("  (input app_clean.html left unchanged)")
 
 
-def process_extracted(doc_dir, patch, add_icon=True):
+def process_extracted(doc_dir, patch, add_icon=True, app_fixes=()):
     in_js = os.path.join(doc_dir, "app_clean_extracted.js")
     in_html = os.path.join(doc_dir, "app_clean_extracted.html")
     out_js = os.path.join(doc_dir, "app_record_extracted.js")
@@ -185,6 +233,7 @@ def process_extracted(doc_dir, patch, add_icon=True):
 
     print("Building app_record_extracted.js from app_clean_extracted.js:")
     js = apply_js_ops(js, patch["js_ops"], doc_dir)
+    js = apply_js_ops(js, app_fixes, doc_dir, label="fix")
     write_output(out_js, js)
 
     print("Building app_record_extracted.html from app_clean_extracted.html:")
@@ -201,22 +250,34 @@ def process_extracted(doc_dir, patch, add_icon=True):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Build the RECORD/SAVE .sr-export feature version (writes new files; inputs untouched).")
+    default_dir = os.path.dirname(os.path.abspath(__file__))
+    try:  # only to build the --help listing; a missing/broken patch file is reported later
+        epilog = describe_app_fixes(load_patch(default_dir))
+    except Exception:
+        epilog = ""
+
+    ap = argparse.ArgumentParser(
+        description="Build the RECORD/SAVE .sr-export feature version (writes new files; inputs untouched).",
+        epilog=epilog, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mode", choices=["single", "extracted"],
                     help="single = app_clean.html -> app_record.html; "
                          "extracted = app_clean_extracted.{js,html} -> app_record_extracted.{js,html}")
-    ap.add_argument("--dir", default=os.path.dirname(os.path.abspath(__file__)),
+    ap.add_argument("--dir", default=default_dir,
                     help="project directory containing the target files (default: this script's directory)")
     ap.add_argument("-n", "--noicon", action="store_true",
                     help="do not add the favicon <link> to the HTML header")
+    ap.add_argument("--with-app-fixes", nargs="?", const="ALL", default=None, metavar="LIST",
+                    help="also apply fixes to the app itself (see the list below); "
+                         "bare = all, or a comma-separated list of numbers/names")
     args = ap.parse_args()
 
     patch = load_patch(args.dir)
     add_icon = not args.noicon
+    app_fixes = select_app_fix_ops(patch.get("app_fix_ops", []), args.with_app_fixes)
     if args.mode == "single":
-        process_single(args.dir, patch, add_icon=add_icon)
+        process_single(args.dir, patch, add_icon=add_icon, app_fixes=app_fixes)
     else:
-        process_extracted(args.dir, patch, add_icon=add_icon)
+        process_extracted(args.dir, patch, add_icon=add_icon, app_fixes=app_fixes)
     print("Done.")
 
 

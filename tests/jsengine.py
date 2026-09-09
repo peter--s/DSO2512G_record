@@ -69,6 +69,31 @@ def payload(name):
         return f.read()
 
 
+def firmware_check_source(version_data):
+    """The app's firmware test with the `fw_version` payload spliced in, standalone.
+
+    Reproduces the shape of checkFirmwareCompatible(): the app's own exact-match loop,
+    then the payload, then a report of the resulting validity flag. This runs the shipped
+    payload rather than a copy of it, so the truth table below is about what actually ships.
+    """
+    return (
+        "var appParam_isFirmwareVersionValid = 0;\n"
+        "function log() {}\n"
+        "var versionData = %s;\n"
+        "if (versionData) {\n"
+        '    const validVersions = ["V1.3.0C MOD V9B3", "V1.3.0C MOD V9B4"];\n'
+        "    for (var i = 0; i < validVersions.length; i++) {\n"
+        "        if (versionData == validVersions[i]) {\n"
+        "            appParam_isFirmwareVersionValid = 1;\n"
+        "        }\n"
+        "    }\n"
+        "%s\n"
+        "}\n"
+        "__emit(JSON.stringify({valid: appParam_isFirmwareVersionValid}));\n"
+        % (json.dumps(version_data), payload("firmware_version"))
+    )
+
+
 def recording_source(emit_trigger_channel=False):
     """The recording feature's globals + functions, standalone and runnable.
 
