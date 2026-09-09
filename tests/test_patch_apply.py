@@ -190,6 +190,90 @@ class TestPatchOps(unittest.TestCase):
         self.assertEqual(on_disk - set(referenced), set(), "orphan files in patch/")
 
 
+class TestOpMechanics(unittest.TestCase):
+    """insert vs replace, and routing ops to the right document.
+
+    Exercised on a synthetic document so these hold regardless of which app version the
+    repo currently targets, and without needing the (untracked) app inputs.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="srops-")
+        os.makedirs(os.path.join(self.tmp, "patch"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def payload_file(self, name, text):
+        rel = os.path.join("patch", name)
+        with open(os.path.join(self.tmp, rel), "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+        return rel
+
+    def apply(self, text, ops):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return APPLIER.apply_js_ops(text, ops, self.tmp)
+
+    def test_insert_keeps_the_anchor(self):
+        op = {"name": "ins", "anchor": "MARK", "payload_file": self.payload_file("ins.js", "ADDED\n")}
+        self.assertEqual(self.apply("a MARK b", [op]), "a MARKADDED b")
+
+    def test_replace_consumes_the_anchor(self):
+        op = {"name": "rep", "anchor": "MARK", "replace": True,
+              "payload_file": self.payload_file("rep.js", "NEW\n")}
+        self.assertEqual(self.apply("a MARK b", [op]), "a NEW b")
+
+    def test_replace_defaults_to_false(self):
+        """An op without the key must keep behaving as a pure insertion."""
+        op = {"name": "d", "anchor": "M", "payload_file": self.payload_file("d.js", "X\n")}
+        self.assertEqual(self.apply("M", [op]), "MX")
+
+    def test_missing_anchor_aborts(self):
+        op = {"name": "gone", "anchor": "NOPE", "payload_file": self.payload_file("g.js", "X\n")}
+        with self.assertRaises(SystemExit) as cm:
+            self.apply("nothing here", [op])
+        self.assertIn("found 0 times", str(cm.exception))
+
+    def test_duplicate_anchor_aborts(self):
+        """A duplicated anchor is ambiguous, so it must fail rather than patch one at random."""
+        op = {"name": "dup", "anchor": "M", "payload_file": self.payload_file("dup.js", "X\n")}
+        with self.assertRaises(SystemExit) as cm:
+            self.apply("M and M", [op])
+        self.assertIn("found 2 times", str(cm.exception))
+
+    def test_ops_route_by_target(self):
+        js = {"name": "a", "anchor": "x"}
+        explicit = {"name": "b", "anchor": "y", "target": "js"}
+        html = {"name": "c", "anchor": "z", "target": "html"}
+        ops = [js, explicit, html]
+        self.assertEqual([o["name"] for o in APPLIER.ops_for(ops, "js")], ["a", "b"])
+        self.assertEqual([o["name"] for o in APPLIER.ops_for(ops, "html")], ["c"])
+
+
+class TestFaviconPolicy(unittest.TestCase):
+    """--favicon keep|replace, for apps that ship their own icon (beta42 inlines one)."""
+
+    PATCH = {"favicon": {"file": "favicon.ico", "marker": 'rel="icon"',
+                         "link": '<link rel="icon" href="favicon.ico"/>'}}
+
+    def run_favicon(self, html, replace):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return APPLIER.add_favicon(html, self.PATCH, replace_existing=replace)
+
+    def test_adds_when_absent(self):
+        out = self.run_favicon("<head>\n  <meta charset=\"utf-8\"/>\n</head>\n", False)
+        self.assertIn('<link rel="icon" href="favicon.ico"/>', out)
+
+    def test_keep_leaves_the_app_icon_alone(self):
+        html = '<head>\n  <link rel="icon" href="data:image/png;base64,AAAA"/>\n</head>\n'
+        self.assertEqual(self.run_favicon(html, False), html)
+
+    def test_replace_swaps_the_app_icon(self):
+        html = '<head>\n  <link rel="icon" href="data:image/png;base64,AAAA"/>\n</head>\n'
+        out = self.run_favicon(html, True)
+        self.assertNotIn("data:image/png", out)
+        self.assertEqual(out.count('rel="icon"'), 1)
+        self.assertIn('href="favicon.ico"', out)
+
+
 class TestAppFixSelection(unittest.TestCase):
     """--with-app-fixes picks ops by number or name; the default build is unaffected."""
 

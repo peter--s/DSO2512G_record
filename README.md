@@ -323,6 +323,10 @@ python3 apply_record_feature.py single --dir /path/to/project
 # Optional: skip adding favicon.ico to the html header
 python3 apply_record_feature.py single --noicon
 
+# Optional: replace the app's own icon instead of leaving it alone
+# (newer app versions ship an inline favicon; the default is to keep it)
+python3 apply_record_feature.py single --favicon replace
+
 # Optional: also apply fixes to the app itself (see --help for the numbered list)
 python3 apply_record_feature.py single --with-app-fixes
 python3 apply_record_feature.py single --with-app-fixes=fw_version   # or =1
@@ -346,9 +350,13 @@ Notes:
 - **Runtime assets:** keep `oscilloscope_custom.ttf` and `favicon.ico` next to the HTML.
   For the extracted pair, also keep `app_record_extracted.js` and `jszip.min.js` alongside
   `app_record_extracted.html`.
-- The JS insertions are matched by **unique code anchors**, which are identical in the inline
+- The insertions are matched by **unique code anchors**, which are identical in the inline
   `<script>` of `app_clean.html` and in `app_clean_extracted.js`, so the same patch applies
-  to both. The RECORD button is inserted after `#button-power` with matching indentation.
+  to both. An anchor that is missing *or* duplicated aborts the build rather than guessing.
+- Ops are insertions by default — the payload lands after the anchor and the anchor survives.
+  An op marked `"replace": true` substitutes the payload *for* the anchor instead, which is
+  what fixes to existing app code need. Ops carrying `"target": "html"` apply to the HTML
+  rather than the JS, which only matters in `extracted` mode where they are two files.
 - Inputs are never modified — the feature is written to `app_record*.` outputs; re-running
   simply rebuilds them (backing up any existing output to `<file>.bak`).
 - Idempotent guard: the script aborts if the *input* already contains the feature.

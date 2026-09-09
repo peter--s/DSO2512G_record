@@ -68,15 +68,33 @@ def op_payload(op, doc_dir):
 
 
 def apply_js_ops(text, js_ops, doc_dir, label="js"):
-    """Insert each payload immediately after its (unique) anchor."""
+    """Apply each op at its (unique) anchor.
+
+    Default is insertion: the payload lands immediately after the anchor, which keeps the
+    anchor itself in the output and makes the op a pure addition. An op marked
+    "replace": true substitutes the payload *for* the anchor instead — needed for fixes that
+    correct existing code rather than extend it. Either way the anchor must be unique, so a
+    change in the app that moves or duplicates it fails loudly rather than landing twice.
+    """
     for op in js_ops:
         anchor, payload = op["anchor"], op_payload(op, doc_dir)
         n = text.count(anchor)
         if n != 1:
             raise SystemExit(f"ERROR: {label} anchor for '{op['name']}' found {n} times (expected 1). Aborting.")
-        text = text.replace(anchor, anchor + payload, 1)
-        print(f"  {label}: applied '{op['name']}'")
+        replacing = op.get("replace", False)
+        text = text.replace(anchor, payload if replacing else anchor + payload, 1)
+        print(f"  {label}: {'replaced at' if replacing else 'applied'} '{op['name']}'")
     return text
+
+
+def ops_for(ops, target):
+    """The ops aimed at one document.
+
+    In `single` mode the app is one file, so JS and HTML/CSS ops both apply to it. In
+    `extracted` mode they are two files and each op has to go to the right one; an op says
+    which with "target": "html", defaulting to "js".
+    """
+    return [op for op in ops if op.get("target", "js") == target]
 
 
 def select_app_fix_ops(all_ops, spec):
@@ -171,13 +189,24 @@ def reference_jszip(html, patch):
     return html
 
 
-def add_favicon(html, patch):
+def add_favicon(html, patch, replace_existing=False):
     """Insert the favicon <link> as the first child of <head>, matching the
-    indentation of the existing first head child (works for both HTML files)."""
+    indentation of the existing first head child (works for both HTML files).
+
+    Newer app versions ship their own favicon (beta42 inlines one as a data URI), so by
+    default an existing icon is left alone. --favicon replace swaps it for the patch's own.
+    """
     fav = patch["favicon"]
     if fav["marker"] in html:
-        print("  html: favicon link already present, skipping")
-        return html
+        if not replace_existing:
+            print("  html: favicon link already present, skipping")
+            return html
+        m = re.search(r'[ \t]*<link\b[^>]*\brel="icon"[^>]*>[ \t]*\n?', html)
+        if not m:
+            raise SystemExit("ERROR: an icon is present but its <link> could not be located "
+                             "to replace. Aborting.")
+        html = html[:m.start()] + html[m.end():]
+        print("  html: removed the app's own favicon link")
     m = re.search(r'<head>[^\n]*\n', html)
     if not m:
         raise SystemExit("ERROR: <head> not found; cannot add favicon. Aborting.")
@@ -196,7 +225,7 @@ def write_output(path, text):
     print(f"  wrote: {os.path.basename(path)}")
 
 
-def process_single(doc_dir, patch, add_icon=True, app_fixes=()):
+def process_single(doc_dir, patch, add_icon=True, app_fixes=(), replace_icon=False):
     in_path = os.path.join(doc_dir, "app_clean.html")
     out_path = os.path.join(doc_dir, "app_record.html")
     if not os.path.exists(in_path):
@@ -206,17 +235,20 @@ def process_single(doc_dir, patch, add_icon=True, app_fixes=()):
     if patch["js_marker"] in html or patch["record_marker"] in html:
         raise SystemExit("ERROR: app_clean.html already contains the RECORD feature. Aborting (nothing changed).")
     print("Building app_record.html (single, self-contained) from app_clean.html:")
+    # One document here, so JS and HTML ops both apply to it.
     html = apply_js_ops(html, patch["js_ops"], doc_dir)
+    html = apply_js_ops(html, patch.get("html_ops", []), doc_dir, label="html")
     html = apply_js_ops(html, app_fixes, doc_dir, label="fix")
-    html = apply_record_button(html, patch)
+    if patch.get("button_anchor_id"):
+        html = apply_record_button(html, patch)
     html = inline_jszip(html, doc_dir, patch)
     if add_icon:
-        html = add_favicon(html, patch)
+        html = add_favicon(html, patch, replace_existing=replace_icon)
     write_output(out_path, html)
     print("  (input app_clean.html left unchanged)")
 
 
-def process_extracted(doc_dir, patch, add_icon=True, app_fixes=()):
+def process_extracted(doc_dir, patch, add_icon=True, app_fixes=(), replace_icon=False):
     in_js = os.path.join(doc_dir, "app_clean_extracted.js")
     in_html = os.path.join(doc_dir, "app_clean_extracted.html")
     out_js = os.path.join(doc_dir, "app_record_extracted.js")
@@ -231,18 +263,22 @@ def process_extracted(doc_dir, patch, add_icon=True, app_fixes=()):
     if patch["js_marker"] in js or patch["record_marker"] in html:
         raise SystemExit("ERROR: extracted parts already contain the RECORD feature. Aborting (nothing changed).")
 
+    # Two documents here, so each op has to be routed to the one its anchor lives in.
     print("Building app_record_extracted.js from app_clean_extracted.js:")
     js = apply_js_ops(js, patch["js_ops"], doc_dir)
-    js = apply_js_ops(js, app_fixes, doc_dir, label="fix")
+    js = apply_js_ops(js, ops_for(app_fixes, "js"), doc_dir, label="fix")
     write_output(out_js, js)
 
     print("Building app_record_extracted.html from app_clean_extracted.html:")
-    html = apply_record_button(html, patch)
+    html = apply_js_ops(html, patch.get("html_ops", []), doc_dir, label="html")
+    html = apply_js_ops(html, ops_for(app_fixes, "html"), doc_dir, label="fix")
+    if patch.get("button_anchor_id"):
+        html = apply_record_button(html, patch)
     html = reference_jszip(html, patch)
     # Re-point the app <script src> from the input JS to the output JS.
     html = html.replace("app_clean_extracted.js", "app_record_extracted.js")
     if add_icon:
-        html = add_favicon(html, patch)
+        html = add_favicon(html, patch, replace_existing=replace_icon)
     write_output(out_html, html)
     print("  (inputs left unchanged)")
     print("Note: keep jszip.min.js" + (" and favicon.ico" if add_icon else "") +
@@ -269,15 +305,21 @@ def main():
     ap.add_argument("--with-app-fixes", nargs="?", const="ALL", default=None, metavar="LIST",
                     help="also apply fixes to the app itself (see the list below); "
                          "bare = all, or a comma-separated list of numbers/names")
+    ap.add_argument("--favicon", choices=["keep", "replace"], default="keep",
+                    help="what to do when the app already ships its own icon: keep it "
+                         "(default) or replace it with the patch's favicon")
     args = ap.parse_args()
 
     patch = load_patch(args.dir)
     add_icon = not args.noicon
+    replace_icon = args.favicon == "replace"
     app_fixes = select_app_fix_ops(patch.get("app_fix_ops", []), args.with_app_fixes)
     if args.mode == "single":
-        process_single(args.dir, patch, add_icon=add_icon, app_fixes=app_fixes)
+        process_single(args.dir, patch, add_icon=add_icon, app_fixes=app_fixes,
+                       replace_icon=replace_icon)
     else:
-        process_extracted(args.dir, patch, add_icon=add_icon, app_fixes=app_fixes)
+        process_extracted(args.dir, patch, add_icon=add_icon, app_fixes=app_fixes,
+                          replace_icon=replace_icon)
     print("Done.")
 
 
