@@ -163,15 +163,18 @@ def inline_jszip(html, doc_dir, patch):
     jz = patch["jszip"]
     with open(os.path.join(doc_dir, jz["vendor_file"]), encoding="utf-8") as f:
         lib = f.read().rstrip("\n")
-    marker = "  </style>\n  <script>"
+    # The marker is the app's own opening <script> tag, which differs between app versions
+    # (beta42's first script tag carries an id), so it lives in the patch file.
+    marker = jz.get("marker", "  </style>\n  <script>")
     if html.count(marker) != 1:
-        raise SystemExit("ERROR: could not locate the '</style> + <script>' insertion point. Aborting.")
-    block = ("  </style>\n"
-             "  " + jz["comment"] + "\n"
+        raise SystemExit(f"ERROR: the JSZip insertion marker {marker!r} occurs "
+                         f"{html.count(marker)} times (expected 1). Aborting.")
+    block = (marker.rstrip("\n").rsplit("<script>", 1)[0]
+             + "  " + jz["comment"] + "\n"
              '  <script id="' + jz["script_id"] + '">\n'
              + lib + "\n"
              "  </script>\n"
-             "  <script>")
+             "  <script>" + ("\n" if marker.endswith("\n") else ""))
     html = html.replace(marker, block, 1)
     print(f"  html: inlined {jz['vendor_file']} ({len(lib)} bytes)")
     return html
