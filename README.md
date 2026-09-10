@@ -325,6 +325,34 @@ so it starts a new segment rather than mixing them, exactly as a samplerate chan
 sidecar reports `capture_mode` per frame, `capture_modes` for the file, and the display
 processing that was active.
 
+## Timeline modes: realtime and frames
+
+A scope does not produce a continuous stream — each frame is a separate triggered acquisition —
+so by default the recorder places every frame at its true wall-clock offset and fills the dead
+time with `NaN`. The gaps *are* the frame boundaries, which is why no marker channel is needed.
+
+At a fast time/div that becomes untenable. A frame covers `12 × time/div` of signal but arrives
+about every 100 ms, so at 2 µs/div a 24 µs frame is followed by ~100 ms of nothing — a duty
+cycle of 0.02%. Measured on a real 12.2 s capture at 100 MS/s:
+
+| | samples/ch | on disk | libsigrok read |
+|---|---|---|---|
+| realtime placement | 1,210,002,401 | 9.85 MB | **397 s** |
+| frames, back to back | 292,922 | 0.15 MB | **0.1 s** |
+
+**Storage is not the problem** — a `NaN` run deflates about 1000:1, so 9.68 GB of timeline
+becomes a 9.9 MB file. The cost is in the reading: every consumer has to walk all 1.2 billion
+samples. `sigrok-cli` needed 6 minutes 37 seconds and bounded ~1 GB of memory; PulseView, which
+keeps the whole set for scrolling, would need the full 9.7 GB.
+
+So past `recordMaxTimelineSamples` the recorder re-plans in **`frames` mode**: acquisitions are
+packed back to back. Every acquired sample is kept and each frame's own timebase stays exact —
+what is lost is the spacing *between* acquisitions, which at that duty cycle conveys almost
+nothing and is preserved anyway as each frame's `t_ms` in the sidecar. `timeline.mode` says
+which layout a file uses, and a `frames`-mode file carries a warning saying so.
+
+Turbo does not avoid this: 80 ms instead of 100 ms moves a factor of 4131 to about 3300.
+
 ## The patching script
 
 `apply_record_feature.py` reads `record_feature.patch.json` and builds the recording feature version as

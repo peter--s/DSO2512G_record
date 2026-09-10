@@ -1165,3 +1165,123 @@ class TestCaptureModeRate(unittest.TestCase):
         self.assertEqual(got["interp"], 1)
         self.assertEqual(got["sr"], 800)
         self.assertEqual(got["full"], 4801)
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestFramesTimelineMode(unittest.TestCase):
+    """Back-to-back placement, for when realtime placement would be mostly NaN.
+
+    At a fast time/div a frame covers 12 x TPD but arrives every ~100 ms, so an honest
+    realtime timeline is ~99.98% padding. Measured: a 12 s capture at 100 MS/s needs
+    1.21e9 samples/channel - only 9.9 MB on disk, but 6.6 minutes for libsigrok to read,
+    against 0.1 s for the same frames packed. The padding is cheap to store and expensive
+    to consume, which is what the budget is really guarding.
+    """
+
+    def plan(self, mode, gap_ms, n=4, length=100, rate=1000, base=None):
+        frames = [{"t": i * gap_ms} for i in range(n)]
+        src = recording_source() + (
+            "\nvar frames = %s.map(function (f) {\n"
+            "  return {ch1: new Array(%d).fill(0.1), ch2: null, s: {t: f.t}}; });\n"
+            "var tl = planRecordingTimeline(frames, %d, %s, %s);\n"
+            "__emit(JSON.stringify({mode: tl.mode, total: tl.total, oversize: tl.oversize,\n"
+            "  t0: tl.t0, starts: tl.plan.map(function (p) { return p.start; }),\n"
+            "  gaps: tl.plan.map(function (p) { return p.gap; })}));\n"
+            % (json.dumps(frames), length, rate, json.dumps(mode), json.dumps(base))
+        )
+        return run_js_json(src)
+
+    def test_frames_mode_packs_back_to_back(self):
+        got = self.plan("frames", gap_ms=1000)
+        self.assertEqual(got["mode"], "frames")
+        self.assertEqual(got["starts"], [0, 100, 200, 300])
+        self.assertEqual(got["gaps"], [0, 0, 0, 0])
+        self.assertEqual(got["total"], 400)
+
+    def test_realtime_mode_still_spaces_frames(self):
+        """The default must be unchanged: 1 s apart at 1 kHz is 1000 samples apart."""
+        got = self.plan("realtime", gap_ms=1000)
+        self.assertEqual(got["mode"], "realtime")
+        self.assertEqual(got["starts"], [0, 1000, 2000, 3000])
+
+    def test_frames_mode_is_never_oversize(self):
+        """Packed frames total the captured samples, so the budget cannot be exceeded."""
+        got = self.plan("frames", gap_ms=10_000_000)
+        self.assertFalse(got["oversize"])
+        self.assertEqual(got["total"], 400)
+
+    def test_realtime_flags_oversize_on_a_sparse_recording(self):
+        """9 gaps of 10 Ms each is 90 M samples, past the 50 M budget."""
+        got = self.plan("realtime", gap_ms=10_000_000, n=10)
+        self.assertTrue(got["oversize"])
+        self.assertGreater(got["total"], 50_000_000)
+
+    def test_explicit_t0_is_honoured(self):
+        """A recording-wide t0 keeps t_ms comparable across the files of a split recording.
+
+        Without it each segment used its own first frame, so every single-frame file
+        reported t_ms: 0 while its own warning claimed the offset was preserved.
+        """
+        got = self.plan("frames", gap_ms=1000, base=0)
+        self.assertEqual(got["t0"], 0)
+        shifted = self.plan("frames", gap_ms=1000, base=-5000)
+        self.assertEqual(shifted["t0"], -5000)
+
+    def test_default_t0_is_the_first_frame(self):
+        got = self.plan("realtime", gap_ms=1000)
+        self.assertEqual(got["t0"], 0)
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestFramesTimelineSidecar(unittest.TestCase):
+    """t_ms must survive packing: it is the only record of when a frame actually arrived."""
+
+    def sidecar(self, mode, gap_ms, base):
+        n = 3
+        frames = [{"t": base + i * gap_ms} for i in range(n)]
+        src = recording_source() + (
+            "\nvar frames = %s.map(function (f) {\n"
+            "  return {ch1: new Array(10).fill(0.1), ch2: null,\n"
+            "    s: {t: f.t, sr: 1000, tpd: 1, len: 10, trigIdx: 5, src: 'acquired',\n"
+            "        acq: 'Sample', interpScale: 1,\n"
+            "        proc: {interpolation: 'OFF', ch1_lpf: 'OFF', ch2_lpf: 'OFF', stabilize: 'ON'},\n"
+            "        ch1: {vpd: 1, vpos: 0, probe: '10x', coupling: 'DC', lpf: 'OFF'},\n"
+            "        ch2: {on: false, vpd: 1, vpos: 0, probe: '10x', coupling: 'DC', lpf: 'OFF'},\n"
+            "        trig: {src: 'CH1', mode: 'Auto', edge: 'rising', level: 0}}}; });\n"
+            "var tl = planRecordingTimeline(frames, 1000, %s, %s);\n"
+            "__emit(JSON.stringify(buildRecordingSidecar(tl, false, [], 1, 1, 1000)));\n"
+            % (json.dumps(frames), json.dumps(mode), json.dumps(base))
+        )
+        return run_js_json(src)
+
+    def test_t_ms_survives_packing(self):
+        """Frames sit back to back in the file but still report when they arrived."""
+        sc = self.sidecar("frames", gap_ms=250, base=1000)
+        self.assertEqual([f["t_ms"] for f in sc["frames"]], [0, 250, 500])
+        self.assertEqual([f["start_sample"] for f in sc["frames"]], [0, 10, 20])
+        self.assertEqual(sc["timeline"]["mode"], "frames")
+
+    def test_t_ms_is_relative_to_the_recording_not_the_segment(self):
+        """A segment whose frames start 5 s in must not restart its clock at zero.
+
+        The frames sit at t = 5000..5500 while the RECORDING began at t = 0, so their
+        offsets are 5000..5500 - not 0, which is what a per-segment t0 produced.
+        """
+        n = 3
+        frames = [{"t": 5000 + i * 250} for i in range(n)]
+        src = recording_source() + (
+            "\nvar frames = %s.map(function (f) {\n"
+            "  return {ch1: new Array(10).fill(0.1), ch2: null,\n"
+            "    s: {t: f.t, sr: 1000, tpd: 1, len: 10, trigIdx: 5, src: 'acquired',\n"
+            "        acq: 'Sample', interpScale: 1,\n"
+            "        proc: {interpolation: 'OFF', ch1_lpf: 'OFF', ch2_lpf: 'OFF', stabilize: 'ON'},\n"
+            "        ch1: {vpd: 1, vpos: 0, probe: '10x', coupling: 'DC', lpf: 'OFF'},\n"
+            "        ch2: {on: false, vpd: 1, vpos: 0, probe: '10x', coupling: 'DC', lpf: 'OFF'},\n"
+            "        trig: {src: 'CH1', mode: 'Auto', edge: 'rising', level: 0}}}; });\n"
+            "var tl = planRecordingTimeline(frames, 1000, 'frames', 0);\n"   # recording t0 = 0
+            "__emit(JSON.stringify(buildRecordingSidecar(tl, false, [], 2, 3, 1000)));\n"
+            % json.dumps(frames)
+        )
+        sc = run_js_json(src)
+        self.assertEqual([f["t_ms"] for f in sc["frames"]], [5000, 5250, 5500])
+        self.assertEqual([f["start_sample"] for f in sc["frames"]], [0, 10, 20])
