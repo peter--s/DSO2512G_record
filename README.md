@@ -35,7 +35,7 @@ self‑contained `app_clean.html` (or to its extracted `app_clean_extracted.js` 
   hard‑codes `SR_MQ_VOLTAGE` / `SR_UNIT_VOLT`, so these floats *are* volts to anything that
   opens them. Both terms are taken **per frame**, so adjusting the scope mid‑recording does
   not corrupt the frames that follow, and the result is the same across all three signal
-  sources even though `WAV`, `DataBuffer` and `DataBuffer2` reach the samples by different
+  paths, and records which of the two capture modes produced the samples.
   routes.
 - **A frame carrying `NaN` among real readings is reported.** In single-channel mode
   `DataBuffer2` interleaves CH2's and CH1's samples to double the rate, indexing both by
@@ -75,8 +75,8 @@ also records `samplerate_exact` (metadata rounds to whole Hz) and the app's
 `verticalOffsetCH1/CH2` calibration constants, which stay baked into every sample because
 they are what makes the export agree with the scope's own on‑screen readouts.
 
-Those constants are reported **only when the frames actually carried them**: the `WAV` path
-negates instead and applies no offset, so a WAV capture omits them rather than claiming
+Those constants are reported for every frame: beta42 has a single data path, so they always
+apply. The sidecar says which capture mode produced the samples rather than claiming
 something untrue, and a mixed capture says which frames they apply to. `signal_sources`
 lists the paths used, and `samplerate_estimated` marks a rate the app could only infer from
 the frame length and then clamp to the hardware ceiling — 50 ns/div computes 500 MHz and is
@@ -258,7 +258,7 @@ DSO2512G_SR=~/Downloads/DSO2512G_recording_20260826T101500.sr \
 
 | File | Role |
 |------|------|
-| `DSO2512G-APP-beta10.html` + **`oscilloscope_custom.ttf`** | Hi‑Ban's app ([EEVblog thread](https://www.eevblog.com/forum/testgear/new-2ch-pocket-dsosg-sigpeak-dso2512g/msg5897308/#msg5897308)); copy the HTML to `app.html`. The `.ttf` provides the custom on‑screen symbols. |
+| `DSO2512G-APP-beta42.html` + **`oscilloscope_custom.ttf`** | Hi‑Ban's app ([EEVblog thread](https://www.eevblog.com/forum/testgear/new-2ch-pocket-dsosg-sigpeak-dso2512g/msg5897308/#msg5897308)); copy the HTML to `app.html`. The `.ttf` provides the custom on‑screen symbols. |
 | `js_analyzer.py` | Cleans/pretty‑prints (`--clean`), analyses, and (`-e`) splits `app.html` into separate JS/HTML — from [peter--s/js_tools](https://github.com/peter--s/js_tools/). |
 | `app_clean.html` | Pristine cleaned app (no recording feature); produced by `js_analyzer.py --clean`. |
 | `app_clean_extracted.js` / `app_clean_extracted.html` | Extracted JS + HTML shell (no recording feature); produced by `js_analyzer.py -e`. |
@@ -283,7 +283,7 @@ source .venv/bin/activate            # Windows: .venv\Scripts\activate
 pip install beautifulsoup4 esprima jsbeautifier
 
 # pristine working copy
-cp DSO2512G-APP-beta10.html app.html
+cp DSO2512G-APP-beta42.html app.html
 
 # clean + extract + report in one step:
 python3 js_analyzer.py app.html --clean -e -n -g -u > README.txt
@@ -299,6 +299,31 @@ extracted files are named `app_clean_extracted.*`. The title repair — restorin
 that `prettify()` strips — is applied to both the cleaned HTML and the extracted HTML.
 
 ---
+
+## What gets recorded: displayed or acquired
+
+beta42 processes the samples on their way to the screen — a low-pass filter, optional
+interpolation (×4 synthetic points), optional averaging, then the vertical position offset. So
+"the samples" is ambiguous, and pressing **REC** asks which you want:
+
+| | taken from | includes |
+|---|---|---|
+| **as displayed** | `CH1rawPoints`, at the end of `processWaveforms()` | filter, interpolation, averaging, vertical offset — exactly what is drawn |
+| **as acquired** | the array just after `trimWaveArray()` | filter only. Forces interpolation off for the recording and restores your setting afterwards |
+
+The choice is remembered across sessions in `localStorage`. The dialog also offers *don't ask
+again this session*, which is deliberately **not** persisted — reloading the page always
+restores the question, so changing your mind costs a refresh.
+
+Both modes are independent of the channel position knob. `applyOffset()` adds it absolutely and
+runs after the acquired snapshot point, so a displayed frame carries it and has it subtracted
+back out, while an acquired frame never received it; `vpos` in the sidecar follows the mode.
+With the processing off the two are equal sample for sample.
+
+The mode is also a **grouping key**: changing it mid-recording changes what the numbers mean,
+so it starts a new segment rather than mixing them, exactly as a samplerate change does. The
+sidecar reports `capture_mode` per frame, `capture_modes` for the file, and the display
+processing that was active.
 
 ## The patching script
 
@@ -338,13 +363,22 @@ Separate from the recorder, `record_feature.patch.json` carries an `app_fix_ops`
 to defects in the app itself. They are **not applied unless asked for**, so the default build is
 the recorder and nothing else — which keeps it reviewable, and proposable upstream, on its own.
 `--help` lists them numbered; `--with-app-fixes` takes either the bare flag (all of them) or a
-comma-separated list of numbers and/or names.
-
-Currently one:
+comma-separated list of numbers and/or names. Any subset is valid.
 
 | # | name | fix |
 |---|---|---|
-| 1 | `fw_version` | The app tests the firmware reply with **exact string equality** against `V9B3`/`V9B4`, so any *newer* modded firmware is rejected — and the app then calls `stopPlotting()`, refusing to run at all — even though its own on-screen message says "or newer". This accepts `V1.3.0C MOD V9Bn` for n ≥ 3, tolerates the untrimmed reply (`versionData` is `response.slice(4)` with no `trim()`), and logs the version, which the app otherwise never does. Needed for firmware V9B5 and above. |
+| 1 | `fw_version` | The firmware reply is tested with **exact string equality**, so any *newer* modded firmware is rejected — and the app then calls `stopPlotting()`, refusing to run at all — even though its own message says "or newer". Accepts `V1.3.0C MOD V9Bn` for n ≥ 5, tolerates the untrimmed reply, and logs the version. **Needed for firmware V9B6 and above.** |
+| 2 | `label_pointer_events` | The 40px push‑to‑50% glyph overlaps the lower half of the rotated trigger LEVEL arrow and, being later in the DOM with no `z-index`, paints on top and swallows its clicks. `.labelTextSymbol` gets `pointer-events: none`; no such glyph has a handler. |
+| 3 | `trigger_50pct` | The 50% button set the level to the channel's **zero reference**, which on a DC-offset signal lands off the waveform so the scope stops triggering — the case the button exists to rescue. Uses 50% of the *signal* (the midpoint between the measured peaks), as Tektronix/Rigol/Siglent do. |
+| 4 | `trigger_state` | The top bar showed the trigger **mode**, printing a green `AUTO` whether or not anything was triggering, so a locked trace and a free‑running one looked identical. Now reports acquisition **state**: `STOP` / `WAIT` / `ROLL` / `TRIG'D` / `AUTO` / `READY`, from a flag latched off the FPGA wait that the app already computed and discarded. The field moves to the right of the top bar with the other trigger items. |
+| 5 | `trigger_hysteresis` | The FPGA trigger hysteresis was hard-coded to 10 codes = **0.4 divisions**, and the band sits entirely on one side of the level, so a rising edge cannot arm near the signal's minimum and a falling edge near its maximum. Exposed on the Trigger menu as a multipurpose‑wheel item, default 5 (0.2 div), 0–20, persisted. |
+| 6 | `trigger_rounding` | `triggerY` is a float and `<< 8` coerces via `ToInt32`, which truncates — so the level was systematically up to one code (0.04 div) low. Rounds first. |
+| 7 | `trigger_clamp` | `triggerY1`/`triggerY2` were clamped to `[8, 250]` **independently**, so near the rails the hysteresis band narrowed and then vanished, silently turning the trigger into a single-level comparator that multi-triggers on noise. Shifts the pair together instead, preserving the band. |
+| 8 | `multi_arrows` | The multipurpose wheel was the only knob without click arrows for single stepping. Adds them, copying the trigger knob's layout. |
+| 9 | `multi_unit_buttons` | The two buttons below the wheel did nothing unless cursors were on, while the unit of the wheel‑adjustable value (CH1/CH2 LP filter frequency, FFT impedance) was reachable only through its own menu slot and only forwards. They now step it in both directions. |
+
+The nine ops together reproduce a hand-verified reference build byte for byte, which is what
+pins the extraction; `tests/test_patch_apply.py` also checks each one applies on its own.
 
 Notes:
 - **Runtime assets:** keep `oscilloscope_custom.ttf` and `favicon.ico` next to the HTML.

@@ -2,11 +2,14 @@
 
 The automated tests pin the conversion arithmetic. What they cannot do is prove the app
 reads the *right* settings off the instrument — that `appParam_currVPD_CH1` really is CH1's
-V/div, that `param_CH1trueVerticalPos` really is where ground sits. Only a known signal
-through a real scope shows that.
+V/div, that `appParam_CH1Offset` really is where ground sits. Only a known signal through a
+real scope shows that.
 
-Most of this has now been done, and the captures are committed as fixtures with automatic
-assertions. What remains is listed at the end.
+Much of this was done against app **beta10** and the captures are committed as fixtures with
+automatic assertions. **Those fixtures pin the .sr format, not the beta42 conversion**: beta42
+moved the zero reference to `offsetDC = Coupling == 'DC' ? 32 : 128` and added per-range
+`appCalib_*` correction tables, so the volts conversion has to be re-verified on hardware
+before any beta42 capture is trusted. That is the first item at the end.
 
 ## What the built-in generator can and cannot do
 
@@ -283,3 +286,32 @@ modes, both channel counts, demo and live acquisition, and splits of 2, 6 and 13
 The one thing no capture can establish is long-term stability, so the checks worth repeating
 after any change to the recording code are Test 8 (demo mode, needs no scope) and Test 1
 (one signal, two channels, different scales and positions).
+
+---
+
+## Outstanding for app beta42
+
+1. **Re-verify the volts conversion on hardware.** beta42 changed the zero reference
+   (`offsetDC` is 32 for DC coupling, 128 for AC) and applies per-range `appCalib_*` tables to
+   the raw codes. `recToVolts()` is unchanged and its arithmetic is pinned by tests, but
+   nothing proves the *reference* is still right. Feed a known DC level and a known amplitude
+   on each coupling and compare with the instrument's own readout. If the DC reference is
+   wrong, every DC recording is offset by about 3.84 divisions.
+2. **Both capture modes, same signal.** Record the same generator output as `displayed` and as
+   `acquired` with interpolation, the low-pass filter and averaging all off. The two `.sr`
+   files should agree sample for sample; they are proven equivalent in the unit tests only
+   against the app's own `applyOffset`, not against the instrument.
+3. **Roll mode at 40 ms.** `ITERATION_INTERVAL` has a turbo setting that halves the poll
+   period, so the per-read growth the frontier trim measures halves too. The trim measures
+   from the recording itself and should adapt, but it has never been run at 40 ms.
+4. **STOP-mode capture.** `scaleVoltsAtoB()` rescales the displayed array between the snapshot
+   point and `applyOffset()`. The recorder should never commit a frame in STOP (no new data
+   arrives), but that path has not been shown to be unreachable.
+
+### Making this repeatable with the app's own generator
+
+beta42 can drive the instrument's signal generator (SIG‑GEN), and the hidden test panel — click
+the version label in the title bar — has a **Batch File** input that replays a list of commands
+(`sendCommandsFromFile()`). Committing one command file per scenario turns the checks above
+from a hand-tuned session into a repeatable one, which matters because they will need redoing
+at every app version bump.

@@ -511,49 +511,60 @@ class TestMessageDuration(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
-class TestSidecarSourceHonesty(unittest.TestCase):
-    """The sidecar must not claim calibration that the frame's code path never applied."""
+class TestSidecarCaptureMode(unittest.TestCase):
+    """The sidecar must say which kind of samples it holds.
 
-    def _sidecar(self, sources):
-        frames = [{"src": s} for s in sources]
+    'displayed' frames can carry interpolated points, so their rate counts display points per
+    second rather than ADC samples; 'acquired' frames never can. Reporting this wrongly would
+    make a synthetic trace look like a measurement.
+    """
+
+    def _sidecar(self, modes, interp=1):
+        frames = [{"src": m} for m in modes]
         harness = recording_source() + (
             "\nrecordSampleRate = 200000000;\n"
             "var frames = %s.map(function (f) {\n"
             "  return {ch1: new Array(4).fill(0.25), ch2: null,\n"
             "    s: {t: 0, sr: 200000000, tpd: 5e-8, len: 4, trigIdx: 2, src: f.src,\n"
-            "        demo: false, acq: 'Sample',\n"
-            "        ch1: {vpd: 0.5, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
-            "        ch2: {on: false, vpd: 1, vpos: 0, probe: '10x', coupling: 'DC', bw: 'OFF'},\n"
+            "        acq: 'Sample', interpScale: %d,\n"
+            "        proc: {interpolation: 'OFF', ch1_lpf: 'OFF', ch2_lpf: 'OFF', stabilize: 'ON'},\n"
+            "        ch1: {vpd: 0.5, vpos: 0, probe: '10x', coupling: 'DC', lpf: 'OFF'},\n"
+            "        ch2: {on: false, vpd: 1, vpos: 0, probe: '10x', coupling: 'DC', lpf: 'OFF'},\n"
             "        trig: {src: 'CH1', mode: 'Auto', edge: 'rising', level: 1}}}; });\n"
             "var tl = planRecordingTimeline(frames, 200000000);\n"
             "__emit(JSON.stringify(buildRecordingSidecar(tl, false, [], 1, 1, 200000000)));\n"
-            % json.dumps(frames)
+            % (json.dumps(frames), interp)
         )
         return run_js_json(harness)
 
-    def test_wav_only_capture_omits_the_offsets(self):
-        """The WAV branch negates and applies no offset, so reporting 0.005 would be a lie."""
-        sc = self._sidecar(["WAV", "WAV"])
-        self.assertNotIn("verticalOffsetCH1", sc["app_calibration"])
-        self.assertIn("verticalScale", sc["app_calibration"])
-        self.assertEqual(sc["signal_sources"], ["WAV"])
+    def test_acquired_capture_is_not_display_points(self):
+        sc = self._sidecar(["acquired", "acquired"])
+        self.assertFalse(sc["samplerate_is_display_points"])
+        self.assertEqual(sc["capture_modes"], ["acquired"])
 
-    def test_databuffer_capture_reports_them(self):
-        sc = self._sidecar(["DataBuffer", "DataBuffer"])
+    def test_displayed_capture_is_flagged(self):
+        """Whatever was drawn is what was recorded, so the rate may count synthetic points."""
+        sc = self._sidecar(["displayed", "displayed"], interp=4)
+        self.assertTrue(sc["samplerate_is_display_points"])
+        self.assertEqual(sc["capture_modes"], ["displayed"])
+
+    def test_mixed_capture_lists_both(self):
+        """The mode is a grouping key, so this should not normally happen - but if it does,
+        the sidecar has to say so rather than describe the file as one kind."""
+        sc = self._sidecar(["acquired", "displayed"])
+        self.assertEqual(sorted(sc["capture_modes"]), ["acquired", "displayed"])
+        self.assertTrue(sc["samplerate_is_display_points"])
+
+    def test_calibration_constants_always_reported(self):
+        """beta42 has one data path, so the app's constants apply to every frame."""
+        sc = self._sidecar(["acquired"])
         self.assertEqual(sc["app_calibration"]["verticalOffsetCH1"], 0.005)
         self.assertEqual(sc["app_calibration"]["applies_to"], "all frames")
 
-    def test_mixed_capture_says_which_frames(self):
-        """Switching source mid-recording means the constants apply to only some frames."""
-        sc = self._sidecar(["DataBuffer", "WAV", "DataBuffer2"])
-        self.assertEqual(sc["app_calibration"]["applies_to"], "DataBuffer frames only")
-        self.assertEqual(sorted(sc["signal_sources"]), ["DataBuffer", "DataBuffer2", "WAV"])
-
-    def test_wav_samplerate_is_flagged_estimated(self):
-        """For WAV the app estimates from frame length then clamps to the hardware ceiling:
-        50 ns/div computes 500 MHz and is reported as 200 MHz."""
-        self.assertTrue(self._sidecar(["WAV"])["samplerate_estimated"])
-        self.assertFalse(self._sidecar(["DataBuffer"])["samplerate_estimated"])
+    def test_samplerate_is_never_estimated(self):
+        """The app now computes the rate from the timebase table, so nothing is guessed."""
+        self.assertFalse(self._sidecar(["displayed"])["samplerate_estimated"])
+        self.assertFalse(self._sidecar(["acquired"])["samplerate_estimated"])
 
 
 @unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
@@ -1039,9 +1050,9 @@ class TestRateDenominatorIsSourceAware(unittest.TestCase):
 class TestFirmwareVersionFix(unittest.TestCase):
     """The opt-in `fw_version` payload: accept the listed minimum 'or newer'.
 
-    Stock beta10 tests the reply with exact string equality against V9B3/V9B4, so any newer
-    modded firmware is rejected and the app calls stopPlotting(). These cases run the shipped
-    patch/firmware_version.js inside a reproduction of the app's own check.
+    The stock app tests the reply with exact string equality against a single version, so any
+    newer modded firmware is rejected and the app calls stopPlotting(). These cases run the
+    shipped payload inside a reproduction of the app's own check.
     """
 
     def decide(self, version_data):
@@ -1049,13 +1060,12 @@ class TestFirmwareVersionFix(unittest.TestCase):
             self.skipTest(jsengine.NO_ENGINE)
         return jsengine.run_js_json(jsengine.firmware_check_source(version_data))["valid"]
 
-    def test_listed_versions_still_accepted(self):
-        for v in ("V1.3.0C MOD V9B3", "V1.3.0C MOD V9B4"):
-            self.assertEqual(self.decide(v), 1, v)
+    def test_listed_version_still_accepted(self):
+        self.assertEqual(self.decide("V1.3.0C MOD V9B5"), 1)
 
     def test_newer_firmware_accepted(self):
-        """The case the fix exists for - V9B5/V9B6 were rejected by the stock check."""
-        for v in ("V1.3.0C MOD V9B5", "V1.3.0C MOD V9B6", "V1.3.0C MOD V9B10"):
+        """The case the fix exists for - V9B6 is rejected by the stock exact-match check."""
+        for v in ("V1.3.0C MOD V9B6", "V1.3.0C MOD V9B7", "V1.3.0C MOD V9B10"):
             self.assertEqual(self.decide(v), 1, v)
 
     def test_untrimmed_reply_accepted(self):
@@ -1071,10 +1081,87 @@ class TestFirmwareVersionFix(unittest.TestCase):
         self.assertEqual(self.decide("V1.3.0C MOD SOMETHING"), 1)
 
     def test_older_firmware_still_rejected(self):
-        """The gate is loosened, not removed."""
-        for v in ("V1.3.0C MOD V9B1", "V1.3.0C MOD V9B2"):
+        """The gate is loosened, not removed: beta42 needs V9B5 for USB-serial boot mode."""
+        for v in ("V1.3.0C MOD V9B3", "V1.3.0C MOD V9B4"):
             self.assertEqual(self.decide(v), 0, v)
 
     def test_non_version_replies_rejected(self):
         for v in ("GARBAGE", "", "V2.0.0 MOD V9B6"):
             self.assertEqual(self.decide(v), 0, repr(v))
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestCaptureModeEquivalence(unittest.TestCase):
+    """Neither capture mode may be affected by the channel position knob.
+
+    applyOffset() adds appParam_CHnOffset absolutely and runs AFTER the snapshot point, so a
+    'displayed' frame carries the knob and must have it subtracted back out, while an 'acquired'
+    frame never received it. Get that wrong and every recording is offset by wherever the knob
+    happened to sit - silently, because the trace still looks right on screen.
+    """
+
+    def volts(self, mode, knob):
+        harness = recording_source() + (
+            "\nfunction applyOffset(a, off) { return a.map(function (v) { return v + off; }); }\n"
+            "appParam_CH1Offset = %r;\n"
+            "recCaptureMode = %s;\n"
+            "var acquired = [0.0, 0.125, -0.25];\n"   # 0 V, +1 div, -2 div
+            "var captured = (recCaptureMode === 'displayed')\n"
+            "    ? applyOffset(acquired, appParam_CH1Offset) : acquired.slice();\n"
+            "var s = recSnapshotSettings(captured.length);\n"
+            "__emit(JSON.stringify(recToVolts(captured, s.ch1.vpd, s.ch1.vpos)));\n"
+            % (knob, json.dumps(mode))
+        )
+        return run_js_json(harness)
+
+    def test_modes_agree_and_ignore_the_knob(self):
+        for knob in (0.0, 0.25, -0.4, 0.9):
+            d = self.volts("displayed", knob)
+            a = self.volts("acquired", knob)
+            for i, (x, y) in enumerate(zip(d, a)):
+                self.assertAlmostEqual(x, y, places=9,
+                                       msg="modes disagree at knob=%s sample %d" % (knob, i))
+            # 1 V/div: 0 V, +1 div, -2 div  ->  0, 1, -2 volts, whatever the knob does
+            for got, want in zip(a, (0.0, 1.0, -2.0)):
+                self.assertAlmostEqual(got, want, places=9, msg="knob=%s leaked into volts" % knob)
+
+    def test_displayed_subtracts_the_offset_acquired_does_not(self):
+        """The two modes must ask for different vpos, or the cancellation above is luck."""
+        src = recording_source() + (
+            "\nappParam_CH1Offset = 0.3;\n"
+            "recCaptureMode = 'displayed'; var d = recSnapshotSettings(3).ch1.vpos;\n"
+            "recCaptureMode = 'acquired';  var a = recSnapshotSettings(3).ch1.vpos;\n"
+            "__emit(JSON.stringify({displayed: d, acquired: a}));\n"
+        )
+        got = run_js_json(src)
+        self.assertAlmostEqual(got["displayed"], 0.3)
+        self.assertEqual(got["acquired"], 0)
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestCaptureModeRate(unittest.TestCase):
+    """Interpolation inflates a 'displayed' frame, so its rate has to be scaled to match."""
+
+    def rate(self, mode, interp_scale):
+        src = recording_source() + (
+            "\nappParam_sampleRate = 800; appParam_interpScale = %d;\n"
+            "appParam_intendedSamples = 4801;\n"
+            "recCaptureMode = %s;\n"
+            "var s = recSnapshotSettings(10);\n"
+            "__emit(JSON.stringify({sr: s.sr, full: s.full, interp: s.interpScale}));\n"
+            % (interp_scale, json.dumps(mode))
+        )
+        return run_js_json(src)
+
+    def test_displayed_scales_rate_and_full_together(self):
+        got = self.rate("displayed", 4)
+        self.assertEqual(got["interp"], 4)
+        self.assertEqual(got["sr"], 3200)
+        self.assertEqual(got["full"], 4801 * 4)
+
+    def test_acquired_ignores_interpolation(self):
+        """'acquired' forces interpolation off, so a stale interpScale must not leak in."""
+        got = self.rate("acquired", 4)
+        self.assertEqual(got["interp"], 1)
+        self.assertEqual(got["sr"], 800)
+        self.assertEqual(got["full"], 4801)

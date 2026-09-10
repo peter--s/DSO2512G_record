@@ -22,7 +22,7 @@ import unittest
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # sha256 of the committed app_record.html, reproduced from the current build inputs.
-BASELINE_SHA256 = "1c9c600e41bb873b32c91d40024d57417032111d932212c8ff101349024aefef"
+BASELINE_SHA256 = "64a2bb2fd52805c336a9e4336466eaff6d41c3d20db4ceb2df7721cd5306b23d"
 
 ARTIFACT = os.path.join(REPO, "app_record.html")
 PATCH_JSON = os.path.join(REPO, "record_feature.patch.json")
@@ -134,19 +134,21 @@ class TestPatchOps(unittest.TestCase):
         # App fixes are opt-in and are NOT in the committed artifact, so they are checked for
         # well-formedness and anchor uniqueness but never for presence in app_record.html.
         self.fix_ops = self.patch.get("app_fix_ops", [])
+        self.html_ops = self.patch.get("html_ops", [])
 
     @unittest.skipIf(MISSING, NEED_INPUTS)
     def test_anchors_occur_exactly_once(self):
         """Every anchor is unambiguous in the pristine input."""
         clean = read(CLEAN)
-        for op in self.ops + self.fix_ops:
-            self.assertEqual(clean.count(op["anchor"]), 1,
-                             "anchor for %r is not unique in app_clean.html" % op["name"])
+        for op in self.ops + self.html_ops + self.fix_ops:
+            for edit in APPLIER.op_edits(op):
+                self.assertEqual(clean.count(edit["anchor"]), 1,
+                                 "anchor for %r is not unique in app_clean.html" % edit["name"])
 
     def test_payload_immediately_follows_anchor(self):
         """Each payload lands exactly once, directly after its anchor."""
         art = read(ARTIFACT)
-        for op in self.ops:
+        for op in self.ops:  # recorder ops only: app fixes are opt-in and not in the artifact
             payload = op_payload(op)
             self.assertEqual(art.count(payload), 1,
                              "payload for %r does not appear exactly once" % op["name"])
@@ -160,7 +162,7 @@ class TestPatchOps(unittest.TestCase):
         available; this is the fallback that still runs when none is. A syntax error
         blanks the whole app rather than failing loudly, so it is worth two checks.
         """
-        code = strip_js("\n".join(op_payload(op) for op in self.ops))
+        code = strip_js("\n".join(op_payload(e) for op in self.ops for e in APPLIER.op_edits(op)))
         for opener, closer in (("{", "}"), ("(", ")"), ("[", "]")):
             depth = 0
             for ch in code:
@@ -177,13 +179,14 @@ class TestPatchOps(unittest.TestCase):
         if not os.path.isdir(patch_dir):
             self.skipTest("payloads are still inline in record_feature.patch.json")
         referenced = []
-        for op in self.ops + self.fix_ops:
-            self.assertIn("payload_file", op, "op %r has no payload_file" % op["name"])
-            rel = op["payload_file"]
-            path = os.path.join(REPO, rel)
-            self.assertTrue(os.path.exists(path), "missing payload file %s" % rel)
-            self.assertNotIn("\r", read(path), "%s must be LF-only" % rel)
-            referenced.append(os.path.abspath(path))
+        for op in self.ops + self.html_ops + self.fix_ops:
+            for edit in APPLIER.op_edits(op):
+                self.assertIn("payload_file", edit, "op %r has no payload_file" % edit["name"])
+                rel = edit["payload_file"]
+                path = os.path.join(REPO, rel)
+                self.assertTrue(os.path.exists(path), "missing payload file %s" % rel)
+                self.assertNotIn("\r", read(path), "%s must be LF-only" % rel)
+                referenced.append(os.path.abspath(path))
         self.assertEqual(len(referenced), len(set(referenced)), "a payload file is referenced twice")
         on_disk = {os.path.abspath(os.path.join(patch_dir, n))
                    for n in os.listdir(patch_dir) if n.endswith(".js")}
@@ -280,6 +283,7 @@ class TestAppFixSelection(unittest.TestCase):
     def setUp(self):
         self.patch = APPLIER.load_patch(REPO)
         self.fix_ops = self.patch.get("app_fix_ops", [])
+        self.html_ops = self.patch.get("html_ops", [])
         if not self.fix_ops:
             self.skipTest("no app_fix_ops defined")
 
@@ -311,6 +315,31 @@ class TestAppFixSelection(unittest.TestCase):
     def test_out_of_range_number_aborts(self):
         with self.assertRaises(SystemExit):
             self.names(str(len(self.fix_ops) + 1))
+
+    @unittest.skipIf(MISSING, NEED_INPUTS)
+    def test_each_fix_applies_on_its_own(self):
+        """Any subset must be valid: the fixes are advertised as individually selectable."""
+        clean = read(CLEAN)
+        for i, op in enumerate(self.fix_ops, 1):
+            ops = APPLIER.select_app_fix_ops(self.fix_ops, str(i))
+            with contextlib.redirect_stdout(io.StringIO()):
+                out = APPLIER.apply_js_ops(clean, ops, REPO, label="fix")
+            self.assertNotEqual(out, clean, "fix %d (%s) changed nothing" % (i, op["name"]))
+
+    @unittest.skipIf(MISSING, NEED_INPUTS)
+    def test_rounding_and_clamp_are_independent(self):
+        """Both edit FPGA_setTrigger and were one hunk originally, so all four combinations
+        of the two must build - in either order."""
+        clean = read(CLEAN)
+        for spec in ("trigger_rounding", "trigger_clamp",
+                     "trigger_rounding,trigger_clamp", "trigger_clamp,trigger_rounding"):
+            ops = APPLIER.select_app_fix_ops(self.fix_ops, spec)
+            with contextlib.redirect_stdout(io.StringIO()):
+                out = APPLIER.apply_js_ops(clean, ops, REPO, label="fix")
+            wants_round = "rounding" in spec
+            wants_clamp = "clamp" in spec
+            self.assertEqual("triggerY1 = Math.round(triggerY1);" in out, wants_round, spec)
+            self.assertEqual("const shift = 8 - triggerY2;" in out, wants_clamp, spec)
 
     @unittest.skipIf(MISSING, NEED_INPUTS)
     def test_fixed_build_differs_and_is_reproducible(self):

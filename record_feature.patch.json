@@ -51,8 +51,203 @@
     {
       "name": "fw_version",
       "description": "accept firmware 'V9B5 or newer' instead of an exact match (needed for V9B6+)",
-      "anchor": "        const validVersions = [\"V1.3.0C MOD V9B5\"]; // right now only V9B5 supports booting into USB Serial mode.\n        for (var i = 0; i < validVersions.length; i++) {\n            if (versionData == validVersions[i]) {\n                appParam_isFirmwareVersionValid = 1;\n            }\n        }",
-      "payload_file": "patch/firmware_version.js"
+      "edits": [
+        {
+          "anchor": "                appParam_isFirmwareVersionValid = 1;\n            }\n        }",
+          "payload_file": "patch/fix_fw_version_1.js"
+        },
+        {
+          "anchor": "        log(\"Firmware \" + versionData);",
+          "payload_file": "patch/fix_fw_version_2.js",
+          "replace": true
+        }
+      ]
+    },
+    {
+      "name": "label_pointer_events",
+      "description": "stop the decorative push-to-50% glyph swallowing clicks on the trigger LEVEL arrow",
+      "anchor": "        .labelTextSymbol{",
+      "payload_file": "patch/fix_label_pointer_events_1.js",
+      "target": "html"
+    },
+    {
+      "name": "trigger_50pct",
+      "description": "50% button moves the trigger to the signal midpoint, not the channel's zero",
+      "anchor": "    appParam_triggerLevel = 0;",
+      "payload_file": "patch/fix_trigger_50pct_1.js",
+      "replace": true
+    },
+    {
+      "name": "trigger_state",
+      "description": "top bar reports acquisition state (TRIG'D/READY/ROLL) instead of trigger mode",
+      "edits": [
+        {
+          "anchor": "    // Multipurpose buttons left/right\n    if (appParam_cursorMode != 'OFF') {",
+          "payload_file": "patch/fix_trigger_state_1.js",
+          "replace": true
+        },
+        {
+          "anchor": "    if (appParam_menuPage == 2 || appParam_menuPage == 4 || appParam_menuPage == 5 || appParam_cursorMode != 'OFF') {",
+          "payload_file": "patch/fix_trigger_state_2.js",
+          "replace": true
+        },
+        {
+          "anchor": "        drawText(ctx, autoUnit(findTriggerVolts(appParam_currVPD_CH2), 2, \"V\"), (trigTextPos + 85), 14, 15, color_CH2, 0, 0);\n    }",
+          "payload_file": "patch/fix_trigger_state_3.js"
+        },
+        {
+          "anchor": "    let trigTextPos = 880 * menuMult;",
+          "payload_file": "patch/fix_trigger_state_4.js",
+          "replace": true
+        },
+        {
+          "anchor": "    drawText(ctx, (appParam_displayMode == 'Overlay' ? \"Ě\" : \"ě\"), 380 * menuMult, 16, 21, 'white', 0, 0); // display (overlay or stacked mode) icon",
+          "payload_file": "patch/fix_trigger_state_5.js",
+          "replace": true
+        },
+        {
+          "anchor": "    drawText(ctx, autoUnit(appParam_stopRun == 0 ? appParam_snapshotSampleRate : appParam_sampleRate, 2, \"Sa/s\"), 230 * menuMult, 14, 15, 'white', 0, 0);",
+          "payload_file": "patch/fix_trigger_state_6.js",
+          "replace": true
+        },
+        {
+          "anchor": "    const pos_timeDiv = 120 * menuMult;",
+          "payload_file": "patch/fix_trigger_state_7.js",
+          "replace": true
+        },
+        {
+          "anchor": "    }\n    drawText(ctx, trigText, (gridLeftMargin + 4), 14, 15, trigTextColor, 1, 0);",
+          "payload_file": "patch/fix_trigger_state_8.js",
+          "replace": true
+        },
+        {
+          "anchor": "        trigText = 'WAIT';",
+          "payload_file": "patch/fix_trigger_state_9.js",
+          "replace": true
+        },
+        {
+          "anchor": "        trigText = 'STOP';\n    } else if (appParam_stopRun == 1) {\n        trigTextColor = '#00E020';\n        trigText = appParam_triggerMode == 'Auto' ? 'AUTO' : 'NORMAL';",
+          "payload_file": "patch/fix_trigger_state_10.js",
+          "replace": true
+        },
+        {
+          "anchor": "    // Draw trigger status text",
+          "payload_file": "patch/fix_trigger_state_11.js"
+        },
+        {
+          "anchor": "            triggerStop = await FPGA_waitUntilReady(0x01, (timePre + timePost) * 2); // return true (trigger event) or false (timeout or forced exit) - timeout currently set to the equivalent of 2 full buffer lengths.",
+          "payload_file": "patch/fix_trigger_state_12.js"
+        },
+        {
+          "anchor": "        if (appParam_timeZoomLvl > 24) { // if roll mode",
+          "payload_file": "patch/fix_trigger_state_13.js"
+        },
+        {
+          "anchor": "let appParam_triggerMode = 'Auto';",
+          "payload_file": "patch/fix_trigger_state_14.js"
+        }
+      ]
+    },
+    {
+      "name": "trigger_hysteresis",
+      "description": "expose the FPGA trigger hysteresis on the Trigger menu (was hard-coded 10)",
+      "edits": [
+        {
+          "anchor": "            appParam_FFTImpedance[0] = 999;\n        }\n        const multiplier = appParam_FFTImpedance[1] == 'Ω' ? 1 : (appParam_FFTImpedance[1] == 'KΩ' ? 1000 : 1000000);\n        appParam_FFTImpedance[2] = appParam_FFTImpedance[0] * multiplier;\n        appParam_FFTImpedance[3] = appParam_FFTImpedance[0].toString().padStart(3, '0') + ' ' + appParam_FFTImpedance[1];\n        labels_MenuOptionValues[3] = appParam_FFTImpedance[3];\n        appParam_menuForceDraw = 1;\n    }",
+          "payload_file": "patch/fix_trigger_hysteresis_1.js"
+        },
+        {
+          "anchor": "            appParam_FFTImpedance[0] = 999;\n        }\n        const multiplier = appParam_FFTImpedance[1] == 'Ω' ? 1 : (appParam_FFTImpedance[1] == 'KΩ' ? 1000 : 1000000);\n        appParam_FFTImpedance[2] = appParam_FFTImpedance[0] * multiplier;\n        appParam_FFTImpedance[3] = appParam_FFTImpedance[0].toString().padStart(3, '0') + ' ' + appParam_FFTImpedance[1];\n        labels_MenuOptionValues[3] = appParam_FFTImpedance[3];\n        appParam_menuForceDraw = 1;",
+          "payload_file": "patch/fix_trigger_hysteresis_2.js"
+        },
+        {
+          "anchor": "            appParam_FFTImpedance[0] = 0;\n        }\n        const multiplier = appParam_FFTImpedance[1] == 'Ω' ? 1 : (appParam_FFTImpedance[1] == 'KΩ' ? 1000 : 1000000);\n        appParam_FFTImpedance[2] = appParam_FFTImpedance[0] * multiplier;\n        appParam_FFTImpedance[3] = appParam_FFTImpedance[0].toString().padStart(3, '0') + ' ' + appParam_FFTImpedance[1];\n        labels_MenuOptionValues[3] = appParam_FFTImpedance[3];\n        appParam_menuForceDraw = 1;",
+          "payload_file": "patch/fix_trigger_hysteresis_3.js"
+        },
+        {
+          "anchor": "        labels_MenuOptionValues[3] = appParam_triggerStabilize;\n        labels_MenuOptionValues[4] = '';",
+          "payload_file": "patch/fix_trigger_hysteresis_4.js",
+          "replace": true
+        },
+        {
+          "anchor": "    localStorage.setItem('appParam_triggerStabilize', appParam_triggerStabilize);",
+          "payload_file": "patch/fix_trigger_hysteresis_5.js"
+        },
+        {
+          "anchor": "    appParam_triggerStabilize = localStorage.getItem('appParam_triggerStabilize') == null ? appParam_triggerStabilize : localStorage.getItem('appParam_triggerStabilize');",
+          "payload_file": "patch/fix_trigger_hysteresis_6.js"
+        },
+        {
+          "anchor": "    let triggerThreshold = 10; // originally 10",
+          "payload_file": "patch/fix_trigger_hysteresis_7.js",
+          "replace": true
+        },
+        {
+          "anchor": "    [\"Trigger\", \"Mode\", \"Level\", \"Stabilize\", \"\", \"\", \"\", \"\", \"\"], // 9",
+          "payload_file": "patch/fix_trigger_hysteresis_8.js",
+          "replace": true
+        }
+      ]
+    },
+    {
+      "name": "trigger_rounding",
+      "description": "round the trigger level before the register pack instead of truncating",
+      "anchor": "    } else {\n        triggerY1 = triggerY + triggerThreshold;\n        triggerY2 = triggerY;\n    }",
+      "payload_file": "patch/fix_trigger_rounding_1.js"
+    },
+    {
+      "name": "trigger_clamp",
+      "description": "clamp the hysteresis pair together so the band cannot collapse at the rails",
+      "anchor": "    triggerY1 = Math.max(Math.min(triggerY1, 250), 8);\n    triggerY2 = Math.max(Math.min(triggerY2, 250), 8);",
+      "payload_file": "patch/fix_trigger_clamp_1.js",
+      "replace": true
+    },
+    {
+      "name": "multi_arrows",
+      "description": "click arrows for the multipurpose wheel, like every other knob has",
+      "edits": [
+        {
+          "anchor": "    <div class=\"led\" id=\"led-multi\" style=\"left: 28px; top: 167px;\">\n    </div>",
+          "payload_file": "patch/fix_multi_arrows_1.js"
+        },
+        {
+          "anchor": "    // set up little arrows as buttons",
+          "payload_file": "patch/fix_multi_arrows_2.js"
+        }
+      ]
+    },
+    {
+      "name": "multi_unit_buttons",
+      "description": "the two buttons below the wheel step the value's unit, in both directions",
+      "edits": [
+        {
+          "anchor": "            appParam_cursorSelected = cycleValueFromTable(appParam_cursorSelected, table_cursorSelected);\n        }\n        if (appParam_menuPage == 7) {\n            labels_MenuOptionValues[4] = appParam_cursorSelected;\n            appParam_menuForceDraw = 1;\n        }",
+          "payload_file": "patch/fix_multi_unit_buttons_1.js"
+        },
+        {
+          "anchor": "            appParam_cursorSelected = cycleValueFromTableRev(appParam_cursorSelected, table_cursorSelected);\n        }\n        if (appParam_menuPage == 7) {\n            labels_MenuOptionValues[4] = appParam_cursorSelected;\n            appParam_menuForceDraw = 1;\n        }",
+          "payload_file": "patch/fix_multi_unit_buttons_2.js"
+        },
+        {
+          "anchor": "function toggleCH2BWLimitUnits() { //[20, 'MHz', 20000000, '020 MHz'];\n    appParam_CH2_LPFValue[1] = appParam_CH2_LPFValue[1] == 'Hz' ? 'KHz' : (appParam_CH2_LPFValue[1] == 'KHz' ? 'MHz' : 'Hz');",
+          "payload_file": "patch/fix_multi_unit_buttons_3.js",
+          "replace": true
+        },
+        {
+          "anchor": "function toggleFFTImpedanceUnits() { //[1, 'MΩ', 1000000, '001 MΩ'];\n    appParam_FFTImpedance[1] = appParam_FFTImpedance[1] == 'Ω' ? 'KΩ' : (appParam_FFTImpedance[1] == 'KΩ' ? 'MΩ' : 'Ω');",
+          "payload_file": "patch/fix_multi_unit_buttons_4.js",
+          "replace": true
+        },
+        {
+          "anchor": "function toggleCH1BWLimitUnits() { //[20, 'MHz', 20000000, '020 MHz'];\n    appParam_CH1_LPFValue[1] = appParam_CH1_LPFValue[1] == 'Hz' ? 'KHz' : (appParam_CH1_LPFValue[1] == 'KHz' ? 'MHz' : 'Hz');",
+          "payload_file": "patch/fix_multi_unit_buttons_5.js",
+          "replace": true
+        },
+        {
+          "anchor": "    // Trigger LED",
+          "payload_file": "patch/fix_multi_unit_buttons_6.js"
+        }
+      ]
     }
   ],
   "record_marker": "id=\"button-record\"",
