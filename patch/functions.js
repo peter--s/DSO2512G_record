@@ -309,29 +309,40 @@ function nanRunToLEBytes(count) {
 //   - the timestamp is arrival time, so placement is good to about one acquisition interval;
 //   - a frame spans 12 * TPD of signal but arrives every few hundred ms, so at slow timebases
 //     frames overlap in wall-clock and the layout necessarily collapses to back to back.
-function planRecordingTimeline(frames, sampleRate) {
-    const t0 = (frames.length && frames[0].s) ? frames[0].s.t : 0;
+function planRecordingTimeline(frames, sampleRate, mode, baseT0) {
+    // t0 is the whole RECORDING's first frame, not this segment's, so t_ms stays comparable
+    // across the files of a split recording. Passing the segment's own first frame instead is
+    // what made every single-frame file report t_ms: 0 while claiming to carry its true offset.
+    const t0 = (baseT0 !== undefined && baseT0 !== null) ? baseT0
+             : ((frames.length && frames[0].s) ? frames[0].s.t : 0);
+    const packed = (mode === "frames");
     const plan = [];
     let cursor = 0, clamped = 0;
     for (let i = 0; i < frames.length; i++) {
         const len = (frames[i].ch1 || []).length;
         const t = frames[i].s ? frames[i].s.t : 0;
-        let start = Math.round(((t - t0) / 1000) * sampleRate);
-        if (!isFinite(start) || start < cursor) {
-            if (isFinite(start) && start < cursor) clamped++;
-            start = cursor; // frames cannot overlap
+        let start;
+        if (packed) {
+            start = cursor; // back to back: the dead time between acquisitions is not represented
+        } else {
+            start = Math.round(((t - t0) / 1000) * sampleRate);
+            if (!isFinite(start) || start < cursor) {
+                if (isFinite(start) && start < cursor) clamped++;
+                start = cursor; // frames cannot overlap
+            }
         }
         plan.push({ frame: frames[i], start: start, gap: start - cursor, len: len });
         cursor = start + len;
     }
 
-    // The budget is not about file size - a NaN run deflates about 1000:1 - but about the
-    // samples every consumer has to materialise. Over it, the caller writes one file per
-    // frame instead: a timeline that has been squashed is actively wrong, whereas separate
-    // frames simply carry no timeline, and the sidecar still records where each one belongs.
+    // The budget is not about file size - a NaN run deflates about 1000:1, and a 12 s recording
+    // at 100 MS/s came to under 10 MB on disk. It is about the samples every consumer has to
+    // walk: that same file took libsigrok 6.6 minutes to read, against 0.1 s for the same
+    // frames packed back to back. Over the budget the caller re-plans in "frames" mode.
     return {
-        plan: plan, total: cursor, mode: "realtime", clamped: clamped, t0: t0,
-        oversize: cursor > recordMaxTimelineSamples
+        plan: plan, total: cursor, mode: packed ? "frames" : "realtime",
+        clamped: clamped, t0: t0,
+        oversize: !packed && cursor > recordMaxTimelineSamples
     };
 }
 
@@ -651,11 +662,11 @@ function splitRecordingBySamplerate(frames) {
 // filled with NaN, so the gaps are the frame boundaries and no marker channel is needed. Chunks
 // must be numbered contiguously from 1 per channel: the reader walks base-1, base-2, ... and
 // stops at the first one missing, so a hole would silently truncate the capture.
-function buildRecordingSegment(frames, sampleRate, segIndex, segCount, stamp) {
+function buildRecordingSegment(frames, sampleRate, segIndex, segCount, stamp, mode, baseT0) {
     // The channel set is decided here rather than at RECORD start: every frame is already
     // buffered, so enabling CH2 part-way through a recording no longer loses it.
     const recAnyCH2 = frames.some((f) => f.ch2 && f.ch2.length > 0);
-    const timeline = planRecordingTimeline(frames, sampleRate);
+    const timeline = planRecordingTimeline(frames, sampleRate, mode, baseT0);
 
     const zip = new JSZip();
     zip.file("version", "2");
@@ -744,16 +755,17 @@ function buildRecordingSegment(frames, sampleRate, segIndex, segCount, stamp) {
             "before the acquisition filled produces this.");
         log("WARNING: " + warnings[warnings.length - 1]);
     }
-    if (segCount > 1 && frames.length === 1) {
-        warnings.push("This file holds a single frame. The recording needed more samples than " +
-            recordMaxTimelineSamples + " per channel to place its frames on one timeline, so each " +
-            "frame was written separately rather than squashed onto a false one. t_ms gives its " +
-            "true offset within the recording.");
+    if (timeline.mode === "frames") {
+        warnings.push("Frames are packed back to back, NOT at their true times: placing them at " +
+            "their real offsets would have needed more than " + recordMaxTimelineSamples +
+            " samples per channel, nearly all of it empty. Every acquired sample is here and each " +
+            "frame's intra-frame timebase is correct, but the dead time between acquisitions is " +
+            "not represented. Each frame's t_ms gives its true offset within the recording.");
     }
     if (segCount > 1) {
-        warnings.push("The samplerate changed mid-recording; this is segment " + segIndex + " of " +
-            segCount + ", each written at its own samplerate. The rate follows the acquired frame " +
-            "length as well as the time/div, so enabling CH2 or demo mode changes it too.");
+        warnings.push("This is segment " + segIndex + " of " + segCount + ". A .sr carries a single " +
+            "samplerate and one meaning of 'sample', so a recording is split whenever either " +
+            "changes. t_ms is an offset into the whole recording, not into this file.");
     }
     zip.file("dso2512g-recording.json",
         JSON.stringify(buildRecordingSidecar(timeline, recAnyCH2, warnings, segIndex, segCount, sampleRate), null, 2));
@@ -776,8 +788,8 @@ function downloadRecordingBlob(blob, filename) {
 }
 
 // Builds one segment and downloads it on its own.
-function exportRecordingSegment(frames, sampleRate, segIndex, segCount, stamp) {
-    const built = buildRecordingSegment(frames, sampleRate, segIndex, segCount, stamp);
+function exportRecordingSegment(frames, sampleRate, segIndex, segCount, stamp, mode, baseT0) {
+    const built = buildRecordingSegment(frames, sampleRate, segIndex, segCount, stamp, mode, baseT0);
     return built.zip.generateAsync({ type: "blob", compression: "DEFLATE" }).then((blob) => {
         downloadRecordingBlob(blob, built.filename);
         log("Saved " + built.frames + " frame(s), " + built.timeline.total +
@@ -793,7 +805,7 @@ function exportRecordingSegment(frames, sampleRate, segIndex, segCount, stamp) {
 // silently dropping the rest: a recording that split thirty ways delivered ten files and
 // said nothing. One archive is one download, so nothing can go missing. The .sr files
 // inside still open in PulseView once extracted.
-function exportRecordingBundle(segments, stamp) {
+function exportRecordingBundle(segments, stamp, mode, baseT0) {
     const outer = new JSZip();
     const filename = "DSO2512G_recording_" + stamp + "_segments.zip";
     let chain = Promise.resolve();
@@ -801,7 +813,7 @@ function exportRecordingBundle(segments, stamp) {
     segments.forEach((seg, i) => {
         chain = chain.then(() => {
             const built = buildRecordingSegment(seg.frames, seg.sampleRate, i + 1,
-                                                segments.length, stamp);
+                                                segments.length, stamp, mode, baseT0);
             total += built.frames;
             // Already-deflated members; storing them again would only cost time.
             return built.zip.generateAsync({ type: "uint8array", compression: "DEFLATE" })
@@ -851,27 +863,57 @@ function exportRecordingSR() {
 
     let segments = splitRecordingBySamplerate(frames);
 
-    // Over budget, every frame becomes its own file rather than being squashed together.
-    const oversize = segments.some((seg) =>
-        planRecordingTimeline(seg.frames, seg.sampleRate).oversize);
-    if (oversize) {
-        const single = [];
-        segments.forEach((seg) => seg.frames.forEach((f) =>
-            single.push({ sampleRate: seg.sampleRate, frames: [f] })));
-        segments = single;
-        log("This recording spans more wall-clock time than " + recordMaxTimelineSamples +
-            " samples/channel can hold at its samplerate, so each frame is written to its own file " +
-            "rather than squashed onto a timeline that would be wrong. Each sidecar's t_ms gives the " +
-            "frame's true offset. Recording at a slower time/div keeps it in one file.");
-        recShowMessage("Too many samples for one timeline - one file per frame");
+    // t0 for the whole recording, so every file's t_ms is an offset into the same recording
+    // rather than into its own segment.
+    const baseT0 = (frames.length && frames[0].s) ? frames[0].s.t : 0;
+
+    // Over budget, pack the frames back to back instead. An oscilloscope frame covers
+    // 12 x time/div of signal but arrives every ~100 ms, so at a fast time/div realtime
+    // placement is almost entirely NaN: measured on a 12 s capture at 100 MS/s, one honest
+    // timeline came to 1.21e9 samples/channel - only 9.9 MB on disk, since a NaN run deflates
+    // about 1000:1, but 6.6 MINUTES for libsigrok to read. The same frames packed back to back
+    // are 293k samples, 152 kB, and load in 0.1 s. What is lost is the spacing between
+    // acquisitions, which at that duty cycle conveys almost nothing and is preserved exactly
+    // in each frame's t_ms anyway.
+    let timelineMode = "realtime";
+    if (segments.some((seg) => planRecordingTimeline(seg.frames, seg.sampleRate, "realtime", baseT0).oversize)) {
+        timelineMode = "frames";
+        const realtimeTotal = segments.reduce((n, seg) =>
+            n + planRecordingTimeline(seg.frames, seg.sampleRate, "realtime", baseT0).total, 0);
+        log("Placing these frames at their true times would need " + realtimeTotal +
+            " samples/channel, past the " + recordMaxTimelineSamples + " budget - almost all of it " +
+            "empty, because each frame covers 12 x time/div but arrives every ~100 ms. Writing them " +
+            "back to back instead: every acquired sample is kept and each frame's t_ms still gives " +
+            "its true offset, but the dead time between acquisitions is not represented. Record at a " +
+            "slower time/div for a real timeline.");
+        recShowMessage("Frames packed back to back - see the log");
     }
 
     const stamp = recordingTimestamp();
     if (segments.length > 1) {
-        log("The samplerate changed during the recording; writing " + segments.length +
-            " files, one per samplerate (a .sr carries only one). The rate is derived from the " +
-            "acquired frame length, so the time/div, the channel mode and demo mode all move it.");
-        recShowMessage("Samplerate changed - saving " + segments.length + " files");
+        // Say what actually differs. Segments are split by samplerate and by capture mode, and
+        // claiming a rate change when every segment shares a rate sends people looking for a
+        // fault that is not there.
+        const rates = [];
+        const modes = [];
+        segments.forEach((s) => {
+            if (rates.indexOf(s.sampleRate) === -1) rates.push(s.sampleRate);
+            const m = (s.frames[0] && s.frames[0].s) ? s.frames[0].s.src : null;
+            if (m && modes.indexOf(m) === -1) modes.push(m);
+        });
+        let why;
+        if (rates.length > 1 && modes.length > 1) {
+            why = "the samplerate and the capture mode both changed";
+        } else if (rates.length > 1) {
+            why = "the samplerate changed (it follows the time/div and the channel mode)";
+        } else if (modes.length > 1) {
+            why = "the capture mode changed";
+        } else {
+            why = "the frames could not share one timeline";
+        }
+        log("Writing " + segments.length + " files because " + why +
+            "; a .sr carries a single samplerate and one meaning of 'sample'.");
+        recShowMessage(segments.length + " files - " + why);
     }
     // A recording that fragments into many one-frame files is almost always a slow timebase
     // rather than someone turning the knob repeatedly. At 200 ms/div and slower the scope
@@ -880,10 +922,10 @@ function exportRecordingSR() {
     // samplerate, so each becomes its own segment. Say so, because ten downloads with
     // implausible rates on them is otherwise a baffling thing to be handed.
     if (segments.length > 4 && segments.every((s) => s.frames.length === 1)) {
-        log("NOTE: every one of these " + segments.length + " files holds a single frame. At a " +
-            "slow time/div the acquisition is read while it is still filling, so the frame length " +
-            "grows with each read and the reported samplerate describes how full the buffer was, " +
-            "not how fast it was sampled. Record at a faster time/div for a usable timeline.");
+        log("NOTE: every one of these " + segments.length + " files holds a single frame, which " +
+            "means each read reported a different samplerate. At a slow time/div the acquisition " +
+            "is read while it is still filling, so the frame length grows with each read and the " +
+            "rate describes how full the buffer was rather than how fast it was sampled.");
         recShowMessage("Slow time/div - samplerates describe buffer fill, not sampling rate");
     }
     // Past a handful, deliver one archive instead of many downloads. A browser will stop
@@ -891,13 +933,13 @@ function exportRecordingSR() {
     if (segments.length > recordMaxSeparateDownloads) {
         log("That is more files than a browser will reliably download; bundling them into " +
             "one .zip instead so none are dropped.");
-        return exportRecordingBundle(segments, stamp);
+        return exportRecordingBundle(segments, stamp, timelineMode, baseT0);
     }
     // Sequential rather than concurrent: browsers throttle bursts of programmatic downloads.
     let chain = Promise.resolve();
     segments.forEach((seg, i) => {
         chain = chain.then(() => exportRecordingSegment(
-            seg.frames, seg.sampleRate, i + 1, segments.length, stamp));
+            seg.frames, seg.sampleRate, i + 1, segments.length, stamp, timelineMode, baseT0));
     });
     return chain;
 }
