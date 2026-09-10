@@ -1,0 +1,1 @@
+    if (appParam_menuPage == 2 || appParam_menuPage == 4 || appParam_menuPage == 5 || appParam_menuPage == 9 || appParam_cursorMode != 'OFF') { // MOD: page 9 (Trigger) now has a wheel-adjustable item

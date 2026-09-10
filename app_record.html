@@ -8708,35 +8708,124 @@ async function togglePlotting() {
 
 //--------------------- RECORDING (PulseView .sr export) --------------------------------------------------------------------------------------------------------------------//
 
-// Toggles recording of acquired samples. RECORD (start) -> SAVE (finish, builds and downloads the .sr file).
+// Toggles recording of acquired samples. REC (start) -> SAVE (finish, builds and downloads the .sr file).
+// Starting asks what the samples should mean, unless that was settled earlier in this session.
 function toggleRecording() {
-    const btn = document.getElementById('button-record');
     if (!appParam_isRecording) {
-        // Start recording. Only possible after START (button is disabled otherwise, but guard anyway).
-        if (!isPlotting) return;
-        recordedFrames = [];
-        appParam_bufferUpdated = false; // start capturing from the next genuinely new frame
-        recPendingCH1 = null;
-        recPendingCH2 = null;
-        recPendingSettings = null;
-        recDroppedFrames = 0;
-        recordSampleRate = appParam_sampleRate; // .sr carries a single samplerate; capture it now
-        appParam_isRecording = true;
-        btn.textContent = "SAVE";
-        btn.classList.add('button-lit');
-        log("Recording started...");
-    } else {
-        // Finish recording and export the .sr file.
-        appParam_isRecording = false;
-        btn.textContent = "RECORD";
-        btn.classList.remove('button-lit');
-        if (recordedFrames.length > 0) {
-            exportRecordingSR();
+        if (!isPlotting) return; // button is disabled unless plotting, but guard anyway
+        if (recSkipCaptureDialog) {
+            recStartRecording();
         } else {
-            log("Recording stopped: no frames were captured.");
+            recShowCaptureDialog();
         }
-        if (!isPlotting) btn.disabled = true; // plotting already stopped -> re-disable RECORD
+    } else {
+        recStopRecording();
     }
+}
+
+// The app's own setting is restored when the recording ends, so forcing it here is not sticky.
+function recStartRecording() {
+    const btn = document.getElementById('button-record');
+    recSavedInterpolation = null;
+    if (recCaptureMode === 'acquired' && appParam_Interpolation !== 'OFF') {
+        // Interpolation runs upstream of the snapshot point, so an 'acquired' capture would
+        // otherwise contain synthetic points. The app recomputes appParam_interpScale from this
+        // on the next processParams(), which happens before any frame can be committed.
+        recSavedInterpolation = appParam_Interpolation;
+        appParam_Interpolation = 'OFF';
+        recShowMessage("INTERPOLATION OFF WHILE RECORDING");
+    }
+    recordedFrames = [];
+    appParam_bufferUpdated = false; // start capturing from the next genuinely new frame
+    recPendingCH1 = null;
+    recPendingCH2 = null;
+    recPendingCH1Acquired = null;
+    recPendingCH2Acquired = null;
+    recPendingSettings = null;
+    recDroppedFrames = 0;
+    recordSampleRate = appParam_sampleRate; // .sr carries a single samplerate; capture it now
+    appParam_isRecording = true;
+    btn.textContent = "SAVE";
+    btn.classList.add('button-lit');
+    log("Recording started (" + recCaptureMode + ")...");
+}
+
+function recStopRecording() {
+    const btn = document.getElementById('button-record');
+    appParam_isRecording = false;
+    btn.textContent = "REC";
+    btn.classList.remove('button-lit');
+    if (recSavedInterpolation !== null) {
+        appParam_Interpolation = recSavedInterpolation;
+        recSavedInterpolation = null;
+    }
+    if (recordedFrames.length > 0) {
+        exportRecordingSR();
+    } else {
+        log("Recording stopped: no frames were captured.");
+    }
+    if (!isPlotting) btn.disabled = true; // plotting already stopped -> re-disable RECORD
+}
+
+// The chosen mode persists across sessions; the "don't ask again" suppression deliberately does
+// not, so reloading the page always restores the question. localStorage can throw outright in a
+// private window, so every access is guarded.
+function recLoadCaptureMode() {
+    try {
+        const v = localStorage.getItem('recCaptureMode');
+        if (v === 'displayed' || v === 'acquired') recCaptureMode = v;
+    } catch (e) { /* keep the default */ }
+}
+
+function recSaveCaptureMode() {
+    try { localStorage.setItem('recCaptureMode', recCaptureMode); } catch (e) { /* ignore */ }
+}
+
+// Builds the dialog once and reuses it. Styles are inline so the patch needs no CSS op, and the
+// option explanations live in title tooltips to keep the dialog itself short.
+function recShowCaptureDialog() {
+    recLoadCaptureMode();
+    let el = document.getElementById('record-capture-dialog');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'record-capture-dialog';
+        el.style.cssText = "position:fixed; inset:0; z-index:9999; background:rgba(0,0,0,0.55); " +
+            "display:flex; align-items:center; justify-content:center; font-family:Arial; font-size:13px;";
+        el.innerHTML =
+            '<div style="background:#333; color:#ddd; border-radius:8px; padding:20px 22px; width:430px; ' +
+            'box-shadow:0 6px 24px rgba(0,0,0,0.6);">' +
+            '<div style="font-size:15px; margin-bottom:14px;">Record which samples?</div>' +
+            '<label style="display:block; margin-bottom:9px; cursor:pointer;" ' +
+            'title="Fully processed data, exactly as drawn: includes the low-pass filter, ' +
+            'interpolation and averaging if those are selected in the GUI.">' +
+            '<input type="radio" name="rec-capture-mode" value="displayed"> Record as displayed</label>' +
+            '<label style="display:block; margin-bottom:14px; cursor:pointer;" ' +
+            'title="Post-trim data, before averaging and before the vertical offset. Forces ' +
+            'interpolation off for the duration of the recording even if it is selected in the GUI.">' +
+            '<input type="radio" name="rec-capture-mode" value="acquired"> Record as acquired</label>' +
+            '<label style="display:block; margin-bottom:16px; color:#aaa; cursor:pointer;" ' +
+            'title="Use this choice for the rest of this session. Reload the page to be asked again.">' +
+            '<input type="checkbox" id="rec-capture-skip"> Don\'t ask again this session</label>' +
+            '<div style="text-align:right;">' +
+            '<button id="rec-capture-cancel" style="margin-right:8px; padding:5px 14px;">Cancel</button>' +
+            '<button id="rec-capture-start" style="padding:5px 14px;">Start</button>' +
+            '</div></div>';
+        document.body.appendChild(el);
+        document.getElementById('rec-capture-cancel').onclick = function () { el.style.display = 'none'; };
+        document.getElementById('rec-capture-start').onclick = function () {
+            const picked = el.querySelector('input[name="rec-capture-mode"]:checked');
+            recCaptureMode = picked ? picked.value : 'displayed';
+            recSkipCaptureDialog = document.getElementById('rec-capture-skip').checked;
+            recSaveCaptureMode();
+            el.style.display = 'none';
+            recStartRecording();
+        };
+    }
+    // Pre-set to the remembered choice every time it opens.
+    const radios = el.querySelectorAll('input[name="rec-capture-mode"]');
+    for (let i = 0; i < radios.length; i++) radios[i].checked = (radios[i].value === recCaptureMode);
+    document.getElementById('rec-capture-skip').checked = false;
+    el.style.display = 'flex';
 }
 
 // True when an array holds at least one usable reading. A frame of nothing but NaN is a

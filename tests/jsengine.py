@@ -69,19 +69,36 @@ def payload(name):
         return f.read()
 
 
-def firmware_check_source(version_data):
-    """The app's firmware test with the `fw_version` payload spliced in, standalone.
+def firmware_payload():
+    """The firmware fix's JS, whichever payload file(s) the patch currently splits it into."""
+    import json as _json
+    with open(os.path.join(REPO, "record_feature.patch.json"), encoding="utf-8") as f:
+        patch = _json.load(f)
+    op = [o for o in patch.get("app_fix_ops", []) if o["name"] == "fw_version"][0]
+    out = []
+    for e in op.get("edits", [op]):
+        # A replace-op payload restates its anchor's context (here, only the version log line),
+        # so it is not part of the acceptance logic this harness exercises.
+        if e.get("replace"):
+            continue
+        with open(os.path.join(REPO, e["payload_file"]), encoding="utf-8") as f:
+            out.append(f.read())
+    return "\n".join(out)
 
-    Reproduces the shape of checkFirmwareCompatible(): the app's own exact-match loop,
-    then the payload, then a report of the resulting validity flag. This runs the shipped
-    payload rather than a copy of it, so the truth table below is about what actually ships.
+
+def firmware_check_source(version_data):
+    """The app's firmware test with the fw_version fix spliced in, standalone.
+
+    Reproduces the shape of checkFirmwareCompatible(): the app's own exact-match loop, then the
+    fix, then a report of the resulting validity flag. This runs the shipped payload rather than
+    a copy of it, so the truth table is about what actually ships.
     """
     return (
         "var appParam_isFirmwareVersionValid = 0;\n"
         "function log() {}\n"
         "var versionData = %s;\n"
         "if (versionData) {\n"
-        '    const validVersions = ["V1.3.0C MOD V9B3", "V1.3.0C MOD V9B4"];\n'
+        '    const validVersions = ["V1.3.0C MOD V9B5"];\n'
         "    for (var i = 0; i < validVersions.length; i++) {\n"
         "        if (versionData == validVersions[i]) {\n"
         "            appParam_isFirmwareVersionValid = 1;\n"
@@ -90,7 +107,7 @@ def firmware_check_source(version_data):
         "%s\n"
         "}\n"
         "__emit(JSON.stringify({valid: appParam_isFirmwareVersionValid}));\n"
-        % (json.dumps(version_data), payload("firmware_version"))
+        % (json.dumps(version_data), firmware_payload())
     )
 
 
@@ -110,19 +127,25 @@ def recording_source(emit_trigger_channel=False):
         "function log() {}\n"
         "function showMessage() {}\n"
         "function findTriggerVolts() { return 0; }\n"
-        "var CH1rawPoints = [], appParam_sampleRate = 1, appParam_currTPD = 1;\n"
-        "var appParam_timeOffset = 0.5, appParam_GeneralSignalSource = 'DataBuffer';\n"
-        "var appParam_demoMode_Enabled = 'OFF', appParam_acquisitionMode = 'Normal';\n"
+        "var CH1rawPoints = [], CH2rawPoints = [];\n"
+        "var appParam_sampleRate = 1, appParam_currTPD = 1, appParam_timeOffset = 0.5;\n"
+        "var appParam_intendedSamples = 4801, appParam_acquisitionMode = 'Sample';\n"
         "var appParam_currVPD_CH1 = 1, appParam_currVPD_CH2 = 1;\n"
-        "var param_CH1trueVerticalPos = 0, param_CH2trueVerticalPos = 0, param_CH2enabled = 0;\n"
+        "var appParam_CH1Offset = 0, appParam_CH2Offset = 0, appParam_CH2Enabled = 'OFF';\n"
         "var appParam_CH1Probe = '1x', appParam_CH2Probe = '1x';\n"
         "var appParam_CH1Coupling = 'DC', appParam_CH2Coupling = 'DC';\n"
-        "var appParam_CH1BWLimit = 'OFF', appParam_CH2BWLimit = 'OFF';\n"
-        "var param_triggerCH1CH2 = 0, param_triggerEdge = 0, appParam_triggerMode = 'Auto';\n"
+        "var appParam_CH1_LPF = 'OFF', appParam_CH2_LPF = 'OFF';\n"
+        "var appParam_triggerSource = 0, appParam_triggerEdge = 0, appParam_triggerMode = 'Auto';\n"
+        "var appParam_triggerStabilize = 'ON';\n"
+        "var appParam_Interpolation = 'OFF', appParam_interpScale = 1;\n"
         "var isPlotting = false;\n"
         "const verticalScale = 1, verticalOffsetCH1 = 0.005, verticalOffsetCH2 = 0.008;\n"
         "var appParam_message = '', appParam_lastMessage = '', appParam_messageChannel = '';\n"
         "var appParam_messageCountdown = 0;\n"
+        # localStorage is absent in a bare JS engine; the recorder guards every access, and
+        # this stub lets the guarded paths run rather than throw.
+        "var localStorage = { _v: {}, getItem: function (k) { return this._v[k] || null; },"
+        " setItem: function (k, v) { this._v[k] = String(v); } };\n"
     )
     return stubs + src
 

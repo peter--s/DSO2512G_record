@@ -67,6 +67,19 @@ def op_payload(op, doc_dir):
     return text[:-1] if text.endswith("\n") else text
 
 
+def op_edits(op):
+    """The edits an op performs.
+
+    A simple op is one anchor and one payload, and carries them directly. A fix to the app is
+    often several separate hunks that only make sense together - a new global, the code that
+    reads it, the menu entry that sets it - so an op may instead carry an "edits" list. Either
+    way the op is the unit the user selects, so a fix cannot be half-applied.
+    """
+    if "edits" in op:
+        return [dict(e, name="%s[%d]" % (op["name"], i)) for i, e in enumerate(op["edits"], 1)]
+    return [op]
+
+
 def apply_js_ops(text, js_ops, doc_dir, label="js"):
     """Apply each op at its (unique) anchor.
 
@@ -77,13 +90,14 @@ def apply_js_ops(text, js_ops, doc_dir, label="js"):
     change in the app that moves or duplicates it fails loudly rather than landing twice.
     """
     for op in js_ops:
-        anchor, payload = op["anchor"], op_payload(op, doc_dir)
-        n = text.count(anchor)
-        if n != 1:
-            raise SystemExit(f"ERROR: {label} anchor for '{op['name']}' found {n} times (expected 1). Aborting.")
-        replacing = op.get("replace", False)
-        text = text.replace(anchor, payload if replacing else anchor + payload, 1)
-        print(f"  {label}: {'replaced at' if replacing else 'applied'} '{op['name']}'")
+        for edit in op_edits(op):
+            anchor, payload = edit["anchor"], op_payload(edit, doc_dir)
+            n = text.count(anchor)
+            if n != 1:
+                raise SystemExit(f"ERROR: {label} anchor for '{edit['name']}' found {n} times (expected 1). Aborting.")
+            replacing = edit.get("replace", False)
+            text = text.replace(anchor, payload if replacing else anchor + payload, 1)
+        print(f"  {label}: applied '{op['name']}'")
     return text
 
 
