@@ -18,6 +18,7 @@ const recordStitchRollingFrames = true; // reassemble a rolling acquisition read
 const recordMessageSeconds = 5; // how long the recorder's own on-screen messages stay up
 let appParam_messageFrames = 0; // one-shot override for the next message's countdown (0 = the app's own default)
 let recDroppedFrames = 0; // frames discarded because they held no usable samples
+let recStitchFailures = []; // geometry of the first few pairs the stitcher could not match
 // What the samples in the export mean. 'acquired' = the post-trim array, before averaging and
 // before the vertical offset - real ADC samples. 'displayed' = CH1rawPoints, i.e. what is drawn,
 // including the low-pass filter, interpolation and averaging. Chosen per recording; also the

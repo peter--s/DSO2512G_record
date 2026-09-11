@@ -554,6 +554,7 @@ function stitchRollingFrames(frames, sampleRate) {
     }
     const out = [];
     let stitched = 0, dropped = 0, worstFrontier = 0;
+    recStitchFailures = [];
     for (let i = 0; i < frames.length; i++) {
         const cur = frames[i];
         const prev = out.length ? out[out.length - 1] : null;
@@ -609,6 +610,17 @@ function stitchRollingFrames(frames, sampleRate) {
             prev.tLast = cur.s.t;
             if (subsumed) dropped++; else stitched++;
             continue;
+        }
+        // Why the chain broke. Each break costs a whole extra frame, so a 1% failure rate
+        // fragments a recording badly - and offline replay of the exported frames has twice
+        // failed to reproduce a live break, which means the geometry at the moment of failure
+        // is the thing to capture rather than infer.
+        if (recStitchFailures.length < 12) {
+            recStitchFailures.push({
+                i: i, lenPrev: a.length, lenCur: b.length, grew: b.length - a.length,
+                dtMs: Math.round(dtMs), expect: Math.round(dtMs / 1000 * sampleRate),
+                slack: slack, worst: worstFrontier
+            });
         }
         out.push({ ch1: cur.ch1, ch2: cur.ch2, s: cur.s, tLast: cur.s ? cur.s.t : 0 });
     }
@@ -878,6 +890,13 @@ function exportRecordingSR() {
     if (prefixes > 0) {
         log("Dropped " + prefixes + " partial read(s) of an acquisition that was still filling; " +
             "each was a prefix of the read that followed.");
+    }
+    if (recStitchFailures.length > 0) {
+        log("STITCH DIAG: " + recStitchFailures.map(function (f) {
+            return "#" + f.i + " prev=" + f.lenPrev + " cur=" + f.lenCur + " grew=" + f.grew +
+                   " dt=" + f.dtMs + "ms expect=" + f.expect + " slack=" + f.slack +
+                   " worst=" + f.worst;
+        }).join(" | "));
     }
 
     let segments = splitRecordingBySamplerate(frames);
