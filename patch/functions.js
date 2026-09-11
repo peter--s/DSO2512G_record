@@ -339,8 +339,12 @@ function planRecordingTimeline(frames, sampleRate, mode, baseT0) {
     // at 100 MS/s came to under 10 MB on disk. It is about the samples every consumer has to
     // walk: that same file took libsigrok 6.6 minutes to read, against 0.1 s for the same
     // frames packed back to back. Over the budget the caller re-plans in "frames" mode.
+    // When most frames had to be clamped they are already back to back, so the layout IS
+    // packed - calling it "realtime" makes the sample count read as a duration it never had.
+    // One 137 s capture at 10 s/div reported 226,955 samples at 20 Sa/s: 11,348 s, 83x too long.
+    const clampedLayout = !packed && plan.length > 1 && clamped >= plan.length / 2;
     return {
-        plan: plan, total: cursor, mode: packed ? "frames" : "realtime",
+        plan: plan, total: cursor, mode: (packed || clampedLayout) ? "frames" : "realtime",
         clamped: clamped, t0: t0,
         oversize: !packed && cursor > recordMaxTimelineSamples
     };
@@ -574,7 +578,22 @@ function stitchRollingFrames(frames, sampleRate) {
                 shift = k;
             }
         }
-        if (shift > 0) {
+        // A read that returns the SAME length as its predecessor brought no new samples: the
+        // poll landed inside one sample period. That only happens when the sample period is
+        // comparable to the poll interval - at 10 s/div the rate is 20 Sa/s, one sample every
+        // 50 ms, against polls measured as close as 39 ms apart - so it appears at the slowest
+        // timebase and nowhere faster. Neither branch above covers it: the search skips k <= 0
+        // and the filling branch requires growth. Every unmatched pair broke the chain and
+        // started a new output frame, which turned one 2755-read capture into 157 frames with
+        // 137 of its 156 pairs still prefixes of their successor.
+        if (shift < 0 && a.length > 0 && b.length === a.length) {
+            const cap = Math.min(slack, Math.floor(b.length / 8));
+            if (recOverlapMatches(a, b, 0, 0, 0) ||
+                (cap > 0 && recOverlapMatches(a, b, 0, cap, 0))) {
+                shift = 0; // same window: the newer read supersedes the older one wholesale
+            }
+        }
+        if (shift >= 0) {
             const f = recFrontierSize(a, b, shift);
             if (f > worstFrontier && f < a.length / 4) worstFrontier = f;
             const overlapLen = b.length - shift;

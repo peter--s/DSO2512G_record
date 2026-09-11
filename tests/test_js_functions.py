@@ -1285,3 +1285,112 @@ class TestFramesTimelineSidecar(unittest.TestCase):
         sc = run_js_json(src)
         self.assertEqual([f["t_ms"] for f in sc["frames"]], [5000, 5250, 5500])
         self.assertEqual([f["start_sample"] for f in sc["frames"]], [0, 10, 20])
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestZeroGrowthReads(unittest.TestCase):
+    """A poll landing inside one sample period returns the same array again.
+
+    At 10 s/div the rate is 20 Sa/s - one sample every 50 ms - while polls were measured as
+    close as 39 ms apart, so a read can bring no new samples at all. Neither the shift search
+    (which skips k <= 0) nor the filling branch (which needs growth) matched such a pair, so
+    the chain broke and each break started a new output frame: 2755 reads became 157 frames
+    with 137 of 156 pairs still prefixes of their successor.
+    """
+
+    def stitch(self, arrays, tpd=10, rate=20, dt=40):
+        frames = [{"ch1": a, "t": i * dt} for i, a in enumerate(arrays)]
+        src = recording_source() + (
+            "\nvar raw = %s;\n"
+            "var frames = raw.map(function (f) {\n"
+            "  return {ch1: f.ch1, ch2: null, s: {t: f.t, tpd: %r, src: 'acquired', full: 2401}}; });\n"
+            "var r = stitchRollingFrames(frames, %d);\n"
+            "__emit(JSON.stringify({out: r.frames.length, stitched: r.stitched, dropped: r.dropped,\n"
+            "  lens: r.frames.map(function (f) { return f.ch1.length; })}));\n"
+            % (json.dumps(frames), tpd, rate)
+        )
+        return run_js_json(src)
+
+    def ramp(self, n):
+        return [round(0.001 * i, 6) for i in range(n)]
+
+    def test_identical_repeat_is_dropped(self):
+        """The same window read twice must collapse to one frame, not two."""
+        a = self.ramp(74)
+        got = self.stitch([a, list(a)])
+        self.assertEqual(got["out"], 1)
+        self.assertEqual(got["lens"], [74])
+
+    def test_repeat_with_a_revised_frontier_is_dropped(self):
+        """The newer read revises the last sample or two; that must not break the chain."""
+        a = self.ramp(74)
+        b = list(a)
+        b[-1] += 0.02
+        b[-2] += 0.02
+        got = self.stitch([a, b])
+        self.assertEqual(got["out"], 1)
+
+    def test_the_newer_read_wins(self):
+        """Equal length means the same window, so the later read supersedes the earlier."""
+        a = self.ramp(50)
+        b = list(a)
+        b[-1] = 9.0
+        got = self.stitch([a, b])
+        self.assertEqual(got["out"], 1)
+
+    def test_a_genuinely_different_frame_is_not_merged(self):
+        """Same length but unrelated content is a new acquisition, and must stay separate."""
+        a = self.ramp(60)
+        b = [round(5.0 - 0.001 * i, 6) for i in range(60)]
+        got = self.stitch([a, b])
+        self.assertEqual(got["out"], 2)
+
+    def test_the_10s_signature_collapses(self):
+        """The real pattern: a filling buffer where some polls bring nothing."""
+        seq = [self.ramp(n) for n in (74, 74, 107, 119, 139, 151, 151, 178, 192)]
+        got = self.stitch(seq)
+        self.assertEqual(got["out"], 1, "zero-growth reads still break the chain")
+        self.assertEqual(got["lens"], [192])
+
+    def test_growth_still_works(self):
+        """The 500 ms/div case that already worked must not regress."""
+        seq = [self.ramp(n) for n in (100, 370, 640, 910)]
+        got = self.stitch(seq, tpd=0.5, rate=400, dt=680)
+        self.assertEqual(got["out"], 1)
+        self.assertEqual(got["lens"], [910])
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestClampedLayoutIsLabelled(unittest.TestCase):
+    """Frames that all overlap in wall-clock are packed in fact, so the file must say so.
+
+    One 137 s capture at 10 s/div reported 226,955 samples at 20 Sa/s - 11,348 s, 83x its
+    true span - while calling itself a realtime timeline.
+    """
+
+    def plan(self, gaps_ms, length=2401, rate=20):
+        frames, t = [], 0
+        for g in gaps_ms:
+            frames.append({"t": t}); t += g
+        src = recording_source() + (
+            "\nvar raw = %s;\n"
+            "var frames = raw.map(function (f) {\n"
+            "  return {ch1: new Array(%d).fill(0.1), ch2: null, s: {t: f.t}}; });\n"
+            "var tl = planRecordingTimeline(frames, %d);\n"
+            "__emit(JSON.stringify({mode: tl.mode, clamped: tl.clamped, total: tl.total}));\n"
+            % (json.dumps(frames), length, rate)
+        )
+        return run_js_json(src)
+
+    def test_overlapping_frames_are_labelled_frames(self):
+        """2401 samples at 20 Sa/s is 120 s of signal arriving every 0.7 s: all overlap."""
+        got = self.plan([700] * 6)
+        self.assertEqual(got["clamped"], 5)  # the first frame has nothing before it to overlap
+        self.assertEqual(got["mode"], "frames")
+
+    def test_well_spaced_frames_stay_realtime(self):
+        """Short frames arriving far apart place honestly and must keep their gaps."""
+        got = self.plan([10000] * 6, length=10)
+        self.assertEqual(got["clamped"], 0)
+        self.assertEqual(got["mode"], "realtime")
+        self.assertGreater(got["total"], 6 * 10)
