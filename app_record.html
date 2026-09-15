@@ -51,8 +51,8 @@
         .knob {
             width: 110px;
             height: 110px;
-            background-color: #666666;
-            border: 2px solid #050505;
+            background-color: #707070;
+            border: 2px solid #151515;
             border-radius: 50%;
             position: absolute;
             top: 50%;
@@ -129,7 +129,6 @@
         .knob.small {
             width: 70px;
             height: 70px;
-            border: 2px solid #050505;
         }
         .knob.small::before {
             width: 49px;
@@ -181,13 +180,16 @@
             margin-top: 10px;
             white-space: pre-wrap;
             font-family: monospace;
-            color: #333;
-            border: 1px solid #ccc;
+            color: #BBB;
+            border: 1px solid #333;
+            border-radius: 2px;
             padding: 10px;
+            width: 1260px;
             height: 250px;
             overflow-y: auto;
             background-color: #fff; /* Keep log background white for readability */
             user-select: text;
+            background: #222;
         }
         #title-text{
             color: #aaa;
@@ -261,6 +263,9 @@
             vertical-align: top;
             position: absolute;
             margin-left: -1280px;
+            -webkit-transform3d: translate(0,0,0);
+            -moz-transform3d: translate(0,0,0);
+            transform3d: translate(0,0,0);
         }
         #plotCanvas {
             background-color: transparent;
@@ -275,10 +280,20 @@
             -ms-transform: translateZ(0);
             -o-transform: translateZ(0);
             transform: translateZ(0);
-            -moz-transition: all 1s;
-            -webkit-transition: all 1s;
-            -o-transition: all 1s;
-            transition: all 1s ;
+        }
+        #hudCanvas {
+            background-color: transparent;
+            vertical-align: top;
+            position: absolute;
+            margin-left: -1280px;
+            -webkit-transform3d: translate(0,0,0);
+            -moz-transform3d: translate(0,0,0);
+            transform3d: translate(0,0,0);
+            -webkit-transform: translateZ(0);
+            -moz-transform: translateZ(0);
+            -ms-transform: translateZ(0);
+            -o-transform: translateZ(0);
+            transform: translateZ(0);
         }
         #menuCanvas {
             background-color: transparent;
@@ -523,7 +538,7 @@
             text-shadow: -0.5px 0px 0.5px #222;
             width: 40px;
             height: 40px;
-            font-size: 10px;
+            font-size: 8px;
             text-align: center;
             line-height: 1.2;
             padding: 0;
@@ -542,7 +557,7 @@
             left: 50%;
             width: 20px;
             height: 6px;
-            background-color: #333333;
+            background-color: var(--bgColor); /*#333333;*/
             transform: translate(-50px, -3px);
             box-shadow: inset 0 0px 5px rgba(0, 0, 0, 0.9);
         }
@@ -587,13 +602,8 @@
             color: white;
             text-shadow: 0px 0px 3px #ffffff;
             background: radial-gradient(#cccc88, #666655);
-            box-shadow: 0px 0px 12px #666644;
-        }
-        .button-connect-lit{
-            color: white;
-            text-shadow: 0px 0px 3px #ffffff;
-            background: radial-gradient(#cccc88, #666655);
-            box-shadow: 0px 0px 12px #666644;
+            /*box-shadow: 0px 0px 12px #666644;*/
+            box-shadow: 0px 0px 3px #444444, 0px 0px 32px rgba(255, 255, 171, 0.6);
         }
         button:active {
             padding-top: 2px;
@@ -616,7 +626,7 @@
         }
         .labelText{
             font-family: Arial;
-            color: #cccccc;
+            color: #aaa;
             font-size: 12px;
             text-align: center;
             line-height: 1.2;
@@ -743,6 +753,9 @@
             border: 1px solid #333;
             border-radius: 2px;
         }
+        .demo-Label {
+            color: #aaaaaa;
+        }
         .smallArrow {
             cursor: pointer;
         }
@@ -753,6 +766,21 @@
         .smallArrow:active {
             color: white;
             text-shadow: 0px 0px 2px #fff, 0px 0px 5px #fff, 0px 0px 5px #fff;
+        }
+        .blurred {
+            filter: blur(1.1px);
+            /*filter: drop-shadow(0px 0px 10px yellow);*/
+        }
+        /* light mode colors -------------------------- */
+        .labelText-light{
+            color: #2a2a2a;
+            text-shadow: 0px 0px 1px #2a2a2a;
+        }
+        .labelTextSymbol-light{
+            color: #2a2a2a;
+        }
+        .separatorlabelText-light{
+            color: #aaaaaa;
         }
   </style>
   <script id="fftWorker" type="text/js-worker">
@@ -1619,7 +1647,7 @@ window.addEventListener('pagehide', () => {
 
 //---------------------------- GLOBAL VARIABLES-------------------------------------------------------------------------------------------------------------------------------------------//
 
-let ITERATION_INTERVAL = 100; // default 100, turbo 50
+let ITERATION_INTERVAL = 100; // default 100, turbo 40
 
 // APP CALIBRATION VALUES: Adjust these so everything looks fine in the app
 const verticalScale = 1; // Adjust vertical scaling to calibrate the waveform amplitude. Should not be necessary, but it's there just in case.
@@ -1701,8 +1729,6 @@ const color_MATH1 = 'dodgerblue';
 const color_FFT = 'red';
 const color_REF = '#BB66AA';
 
-const interpMultiplier = 4; // Adjust the working resolution multiplier for interpolated waveforms in the app. WARNING! high numbers will translate in poor performance! default: 1
-
 let appParam_interpScale = 1;
 
 // Global variables used for serial communication
@@ -1745,6 +1771,7 @@ let currentREFBankDataArray = [
 let appParam_dataIsNew = true; // this variable tracks if the data of the current frame is new
 let appParam_previous_horizontalCurrentPos = 0;
 let appParam_isPanning = 'NO'; // this variable tracks if the user is panning left, right, or no panning
+let appParam_isRollMode = false;
 
 // Waveform channel arrays
 let CH1rawPoints = [];
@@ -1985,11 +2012,15 @@ let appParam_triggerLineCountdown = 0;
 
 // Menu page variable
 let appParam_menuPage = 0; //Global variable for current Menu page
+let appParam_lastMenu = 0;
 // 1 Display variables
 let appParam_gridMode = 'Lines'; // Possible values: 'Lines', 'Dots'
 let appParam_displayMode = 'Overlay'; // Possible values: 'Overlay', 'Stacked'
 let appParam_dotsLines = 'Lines'; // Possible values: 'Lines', 'Dots'
+let table_dotsLines = ["Dots", "Lines"];
 let appParam_lineThickness = '1px';
+let appParam_turboMode = '10fps';
+let appParam_colorTheme = 'Dark';
 // 2 FFT variables
 let appParam_FFTEnabled = 'OFF';
 let appParam_FFTSource = 'CH1';
@@ -2019,10 +2050,18 @@ let appParam_FFTMeasurements = null;
 let appParam_FFTQuality = 'Low';
 // 3 Acquisition variables
 let appParam_acquisitionMode = 'Sample';
-let appParam_acquisitionModeSteps = 2;
-let table_acquisitionModeSteps = [2, 4, 8, 16, 32];
+let table_acquisitionMode = ["Sample", "Average", "Smoothing"];
+let appParam_acquisitionAverageSteps = 2;
+let table_acquisitionAverageSteps = [2, 4, 8, 16, 32];
+let appParam_acquisitionSmoothingSteps = 1;
+let table_acquisitionSmoothingSteps = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+let appParam_acquisitionSmoothingWindow = 'Rectangle';
+let table_acquisitionSmoothingWindow = ["Rectangle", "Hann", "Hamming", "Blackman", "Bartlett", "Gaussian"];
 let appParam_Interpolation = 'OFF';
-let table_Interpolation = ["OFF", "Linear", "PCHIP", "Makima", "Cubic", "Lanczos", "Sinc"];
+let appParam_InterpolationMethod = 'Linear';
+let table_InterpolationMethod = ["Linear", "PCHIP", "Makima", "Cubic", "Lanczos", "Sinc"];
+let appParam_InterpolationUpsampling = '2x';
+let table_InterpolationUpsampling = ["2x", "4x"];
 // 4 CH1 variables
 let table_LPFTypes = ["OFF", "Butterworth", "Bessel", "Chebyshev1", "Chebyshev2", "Elliptic"];
 let appParam_CH1Coupling = 'AC';
@@ -2109,9 +2148,9 @@ let appParam_REFForceUpdate = 0; // Global variable to force redraw the REF wave
 // Array for the menu Labels
 let labels_Menu = [
     ["Not used"],
-    ["Display", "Grid Type", "Display Mode", "Waveform", "Thickness", "", "", "", ""], // 1 
+    ["Display", "Graticule", "Display Mode", "Waveform", "Thickness", "Refresh Rate", "Theme", "", ""], // 1 
     ["FFT", "Enable", "Source", "Ď Impedance  ", "Mode", "Window", "Find Peaks", "Peak Value", "FFT Quality"], // 2
-    ["Acquisition", "Mode", "Avg Steps", "Interpolation", "", "", "", "", ""], // 3
+    ["Acquisition", "Mode", "Steps", "Window", "Interpolation", "Method", "Upsampling", "", ""], // 3
     ["Channel 1", "Coupling", "Probe", "LP Filter", "Ď Filter Freq  ", "", "", "", ""], // 4
     ["Channel 2", "Enable", "Coupling", "Probe", "LP Filter", "Ď Filter Freq  ", "", "", ""], // 5
     ["Math", "Enable", "Operation", "Operand A", "Operand B", "Scale", "", "", ""], // 6
@@ -2487,7 +2526,7 @@ async function FPGA_autoSet() { // TO-DO: Improve it! in rare situations it migh
         if (edgeCount >= (numWindows * minNumEdges) && edgeCount <= (numWindows * maxNumEdges)) {
             fpgaParam_AutoSet_Time = 1; // all good
         } else if (edgeCount < (numWindows * minNumEdges)) {
-            if (appParam_timeZoomLvl < 24) {
+            if (!appParam_isRollMode) {
                 if (fpgaParam_AutoSet_MaxEdges > 500) { // edge case: when frequency is too high, edge detection can fail intermitently. Force reduce zoom level to find the high frequency.
                     appParam_timeZoomLvl--;
                 } else {
@@ -2587,6 +2626,30 @@ async function FPGA_waitUntilReady(mask, timeout) { // 1- wait for trigger event
     }
 }
 
+let appParam_superXYMode = "OFF";
+
+function toggleSuperXYMode(force = -1) {
+    if (force == 1) { // force enable
+        appParam_superXYMode = 'ON';
+        ITERATION_INTERVAL = 16.67;
+    } else if (force == 0) { // force disable
+        appParam_superXYMode = 'OFF';
+        ITERATION_INTERVAL = appParam_turboMode == '25fps' ? 40 : 100;
+    } else if (appParam_XYmode == 'ON') { // normal toggle, can only be used while in XY mode
+        appParam_superXYMode = appParam_superXYMode == 'OFF' ? 'ON' : 'OFF';
+        if (appParam_superXYMode == 'ON') {
+            ITERATION_INTERVAL = 16.67;
+        } else {
+            ITERATION_INTERVAL = appParam_turboMode == '25fps' ? 40 : 100;
+        }
+    } else {
+        return;
+    }
+    clearInterval(iterateInterval);
+    iterateInterval = setInterval(doIteration, ITERATION_INTERVAL);
+    action_rollModeReset = 1;
+}
+
 async function FPGA_getOscilloscopeData() {
     const triggerHOffset = -7; // -7
     try {
@@ -2636,7 +2699,7 @@ async function FPGA_getOscilloscopeData() {
         if (fpgaParam_ch2enabled == 'ON') {
             reg02 |= 0x01; // bit 0 CH2 enabled (0 = CH2 disabled, 1 = CH2 enabled)
         }
-        if (appParam_timeZoomLvl > 24) {
+        if (appParam_isRollMode) {
             reg02 |= 0x04; // bit 2 roll mode (0 = off, 1 = on)
         }
         if (fpgaParam_triggersource == 1) {
@@ -2645,7 +2708,46 @@ async function FPGA_getOscilloscopeData() {
 
         await FPGA_writeRegister(0x02, reg02); // necessary!
 
-        if (appParam_timeZoomLvl > 24) { // if roll mode
+        if (appParam_superXYMode == "ON") { // MODO DE PRUEBAS - TO-DO
+            const table_superXYBufferOffset = [
+                [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1500, 3500, 1860, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+            ];
+            const superXYBufferOffset = table_superXYBufferOffset[1][appParam_timeZoomLvl];
+            //log("ZOOMLVL: " + table_superXYBufferOffset[0][appParam_timeZoomLvl] + " | OFFSET: " + superXYBufferOffset);
+
+            if (action_rollModeReset == 1) {
+                action_rollModeReset = 0;
+                FPGA_setSamplingRate(); // necessary!
+                await FPGA_writeRegister(0x01, 0x02); // stop sampling
+                await FPGA_writeRegister(0x01, 0x04); // starts the sampling (from address 0)
+                rollModeSamples = 0;
+            }
+            if (action_triggerForce == 1) { // if trigger was forced, reset the flag
+                action_triggerForce = 0;
+            }
+            if (appParam_stopRun == 0) { // if STOP mode, return with no data (no waveform update).
+                return null;
+            } else if (appParam_stopRun == 2) { // if forced trigger while in single mode, stop capturing after current capture
+                appParam_stopRun = 0;
+                action_rollModeReset = 1;
+            }
+
+            await FPGA_writeRegister(0x01, 0x80); // force trigger event
+            addr = await FPGA_readRegister(0x09); // read stop addr
+
+            rollModeSamples = Math.min(Math.max(rollModeSamples, addr), 4800); // number goes up with addr, then stops at 4800 and stays there until being reset.
+
+            addr = addr - rollModeSamples + superXYBufferOffset;
+            if (addr < 0) { // if addr is negative, sum 6144 (0x1800)
+                addr = addr + 6144;
+            } else if (addr >= 6144) { // if addr is bigger than max address, subtract 6144
+                addr = addr - 6144;
+            }
+
+            sizeSamples = Math.round(rollModeSamples / 2) + 1;
+
+        } else if (appParam_isRollMode) { // if roll mode
             if (action_rollModeReset == 1) {
                 action_rollModeReset = 0;
                 FPGA_setSamplingRate(); // necessary!
@@ -2849,7 +2951,7 @@ async function connectSerial(reconnect = false) {
         log(`Connected to serial port at ${baudRate} baud${reconnect ? " (reconnected)" : ""}`);
         writer = port.writable.getWriter();
         reader = port.readable.getReader();
-        document.getElementById('toggleConnectBtn').classList.add("button-connect-lit");
+        document.getElementById('toggleConnectBtn').classList.add("button-lit");
         document.getElementById('commandInput').disabled = false;
         document.getElementById('sendBtn').disabled = false;
         document.getElementById('sendTxtBtn').disabled = false;
@@ -2876,7 +2978,7 @@ async function connectSerial(reconnect = false) {
         } else if (!reconnect) {
             log("Failed to connect to serial port: " + error.message);
             port = null;
-            document.getElementById('toggleConnectBtn').classList.remove("button-connect-lit");
+            document.getElementById('toggleConnectBtn').classList.remove("button-lit");
             forceShutdown = true;
         }
     }
@@ -2905,7 +3007,7 @@ async function disconnectSerial() {
             //port = null;
         }
         log("Serial port disconnected successfully.");
-        document.getElementById('toggleConnectBtn').classList.remove("button-connect-lit");
+        document.getElementById('toggleConnectBtn').classList.remove("button-lit");
         document.getElementById('commandInput').disabled = true;
         document.getElementById('sendBtn').disabled = true;
         document.getElementById('sendTxtBtn').disabled = true;
@@ -3202,6 +3304,78 @@ function loadDataFromFile(file) {
     reader.readAsText(file);
 }
 
+function getTimestampFilename() {
+    const now = new Date();
+
+    const yyyy = now.getFullYear();
+    const mm = String(now.getMonth() + 1).padStart(2, "0");
+    const dd = String(now.getDate()).padStart(2, "0");
+
+    const hh = String(now.getHours()).padStart(2, "0");
+    const min = String(now.getMinutes()).padStart(2, "0");
+    const ss = String(now.getSeconds()).padStart(2, "0");
+
+    return `${yyyy}${mm}${dd}-${hh}${min}${ss}`;
+}
+
+async function captureScreenshot(invert = 0) {
+    try {
+        const W = 1280;
+        const H = 720;
+
+        const temp = document.createElement("canvas");
+        temp.width = W;
+        temp.height = H;
+        const ctx = temp.getContext("2d");
+
+        ctx.drawImage(gridCanvas, 0, 0);
+        ctx.drawImage(refCanvas, 0, 0);
+        ctx.drawImage(plotCanvas, 0, 0);
+        ctx.drawImage(hudCanvas, 0, 0);
+        ctx.drawImage(menuCanvas, W - menuCanvas.width, 0); // 1280 - 225 = 1055
+
+        let blob;
+
+        if (invert == 1) {
+            // Canvas invertido
+            const temp2 = document.createElement("canvas");
+            temp2.width = W;
+            temp2.height = H;
+            const ctx2 = temp2.getContext("2d");
+
+            ctx2.filter = "invert(1)";
+            ctx2.drawImage(temp, 0, 0);
+            ctx2.filter = "none";
+
+            blob = await new Promise(resolve => temp2.toBlob(resolve, "image/png"));
+        } else {
+            blob = await new Promise(resolve => temp.toBlob(resolve, "image/png"));
+        }
+
+        // Export and save
+        const suggestedName = "Screenshot-" + getTimestampFilename() + ".png";
+        const opts = {
+            types: [{
+                description: "PNG Image",
+                accept: {
+                    "image/png": [".png"]
+                },
+            }, ],
+            suggestedName,
+        };
+
+        const handle = await window.showSaveFilePicker(opts);
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+
+        log("Screenshot saved.");
+    } catch (error) {
+        // mute errors when user cancels the file save
+        //log(error);
+    }
+}
+
 //---------------------------- WAVEFORM DATA OPERATING FUNCTIONS -------------------------------------------------------------------------------------------------------------------------//
 
 // Calculates the necessary offset to stabilize the waveform so it's less "bouncy"// TO-DO: The algorithm may glitch when panning waveforms on very low refresh rates.
@@ -3285,7 +3459,7 @@ function trimWaveArray(waveArray, channelName = 'CH1') {
     let trimCenter, trimLeft, trimRight;
 
     // Trim everything to 2401/4801 samples, which is the maximum working samples of the oscilloscope (or 4x if interpolation is enabled).
-    if (appParam_timeZoomLvl > 24 || appParam_horizontalSnapshotZoomLvl > 24 || (channelName == 'REF' && appParam_horizontalREFZoomLvl > 24)) { // roll mode
+    if (appParam_isRollMode || appParam_horizontalSnapshotZoomLvl > 23 || (channelName == 'REF' && appParam_horizontalREFZoomLvl > 23)) { // roll mode or snapshots taken in roll mode
         waveArray = waveArray.slice(0, (4800 / appParam_dualChanDiv * appParam_interpScale) + 1);
     } else {
         if ((channelName == 'CH1' || channelName == 'CH2') && appParam_triggerStabilize == 'ON') {
@@ -3354,6 +3528,127 @@ function convertToWaveArrayCH2(hexData) {
         waveArray.push(y);
     }
     return waveArray;
+}
+
+// Performs waveform smoothing of a waveArray by averaging X number of points left and right of each point
+function waveformSmoothing(waveArray, numSteps) {
+    const smoothArray = new Array(waveArray.length);
+    for (let i = 0; i < waveArray.length; i++) {
+        let sum = 0;
+        let count = 0;
+        const start = Math.max(0, i - numSteps);
+        const end = Math.min(waveArray.length - 1, i + numSteps);
+
+        for (let j = start; j <= end; j++) {
+            sum += waveArray[j];
+            count++;
+        }
+        smoothArray[i] = sum / count;
+    }
+    return smoothArray;
+}
+
+function waveformFIRSmoothing(waveArray, numSteps, window = "Rectangle") {
+    const n = waveArray.length;
+    const size = numSteps * 2 + 1;
+    const weights = new Array(size);
+    const N = size - 1; // normalized index 0..N
+
+    // Generate window weights directly here
+    switch (window) {
+
+        case "Rectangle":
+            for (let i = 0; i < size; i++) weights[i] = 1;
+            break;
+
+        case "Hann":
+            for (let i = 0; i < size; i++) {
+                weights[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / N));
+            }
+            break;
+
+        case "Hamming":
+            for (let i = 0; i < size; i++) {
+                weights[i] = 0.54 - 0.46 * Math.cos(2 * Math.PI * i / N);
+            }
+            break;
+
+        case "Blackman":
+            for (let i = 0; i < size; i++) {
+                weights[i] =
+                    0.42 -
+                    0.5 * Math.cos(2 * Math.PI * i / N) +
+                    0.08 * Math.cos(4 * Math.PI * i / N);
+            }
+            break;
+
+        case "Bartlett": // triangular
+            for (let i = 0; i < size; i++) {
+                weights[i] = 1 - Math.abs((i - N / 2) / (N / 2));
+            }
+            break;
+
+        case "Gaussian":
+            const sigma = 0.4; // typical value
+            for (let i = 0; i < size; i++) {
+                const x = (i - N / 2) / (N / 2);
+                weights[i] = Math.exp(-0.5 * (x / sigma) ** 2);
+            }
+            break;
+
+        default:
+            throw new Error("Unknown window type: " + window);
+    }
+
+    const out = new Array(n);
+
+    // Apply smoothing with LOCAL renormalization
+    for (let i = 0; i < n; i++) {
+        let sum = 0;
+        let weightSumLocal = 0;
+
+        for (let k = -numSteps; k <= numSteps; k++) {
+            const idx = i + k;
+
+            if (idx >= 0 && idx < n) {
+                const w = weights[k + numSteps];
+                sum += waveArray[idx] * w;
+                weightSumLocal += w;
+            }
+        }
+
+        out[i] = sum / weightSumLocal; // renormalized window
+    }
+
+    return out;
+}
+
+function waveformIIRSmoothing(waveArray, alpha) {
+    const n = waveArray.length;
+    if (n === 0) return [];
+
+    const forward = new Array(n);
+    const backward = new Array(n);
+
+    // Forward pass (causal exponential smoothing)
+    forward[0] = waveArray[0];
+    for (let i = 1; i < n; i++) {
+        forward[i] = forward[i - 1] + alpha * (waveArray[i] - forward[i - 1]);
+    }
+
+    // Backward pass (anti-causal exponential smoothing)
+    backward[n - 1] = waveArray[n - 1];
+    for (let i = n - 2; i >= 0; i--) {
+        backward[i] = backward[i + 1] + alpha * (waveArray[i] - backward[i + 1]);
+    }
+
+    // Combine both passes (zero-phase)
+    const out = new Array(n);
+    for (let i = 0; i < n; i++) {
+        out[i] = (forward[i] + backward[i]) / 2;
+    }
+
+    return out;
 }
 
 // Performs waveform averaging of a waveArray up to 32 steps either using the bank A (0) or the bank B (1)
@@ -3684,8 +3979,8 @@ function makimaInterpolate(points, i, t) {
 }
 
 // Increase size of the waveform by interpolation. Only makes waveform bigger, not smaller.
-function doInterpolationFixedLength(waveArray, method, desiredLength, channelName = 'CH1') {
-    if (waveArray.length < 2 || method == 'OFF' || waveArray.length >= desiredLength) {
+function doInterpolationFixedLength(waveArray, method = "Linear", desiredLength, channelName = 'CH1') {
+    if (waveArray.length < 2 || waveArray.length >= desiredLength) {
         return waveArray; // Return original array if no interpolation
     }
 
@@ -3808,7 +4103,7 @@ function processForPlotting(waveArray, width, channelName = 'CH1') { // TO-DO: N
     }
 
     if (channelName == 'REF') { // Calculate padding for static waveforms like STOP mode and REF. these can either be padded from the left, right, both sides, or not padded at all. TO-DO: try to unify this!
-        if (appParam_horizontalREFZoomLvl > 24) { // roll mode, incomplete waveforms 
+        if (appParam_horizontalREFZoomLvl > 23) { // roll mode, incomplete waveforms 
             //log("REF-case-1A-rollmode");
             leftPad = ((width / 2) * (1 + 1 / (zoomScale * numChans / appParam_dualChanDiv)) - waveformWidth) - (scaledPos / appParam_dualChanDiv);
         } else { // complete waveforms, these ones come centered
@@ -3816,7 +4111,7 @@ function processForPlotting(waveArray, width, channelName = 'CH1') { // TO-DO: N
             leftPad = ((width - waveformWidth) / 2) - (scaledPos / appParam_dualChanDiv) + (scaledOffset / numChans);
         }
     } else if (appParam_stopRun == 0) { // Calculate padding for static waveforms like STOP mode and REF. these can either be padded from the left, right, both sides, or not padded at all.
-        if (appParam_horizontalSnapshotZoomLvl > 24) { // roll mode, incomplete waveforms
+        if (appParam_horizontalSnapshotZoomLvl > 23) { // roll mode, incomplete waveforms
             //log("STOP-case-1A-rollmode");
             leftPad = ((width / 2) * (1 + 1 / (zoomScale * numChans / appParam_dualChanDiv)) - waveformWidth) - (scaledPos / appParam_dualChanDiv);
         } else { // complete waveforms, these ones come centered
@@ -3824,7 +4119,7 @@ function processForPlotting(waveArray, width, channelName = 'CH1') { // TO-DO: N
             leftPad = ((width - waveformWidth) / 2) - (scaledPos / appParam_dualChanDiv) + (scaledOffset / numChans);
         }
     } else { // Live capture waveforms now need padding aswell
-        if (appParam_timeZoomLvl > 24) { // roll mode, incomplete waveforms
+        if (appParam_isRollMode) { // roll mode, incomplete waveforms
             //log("WAV-case-1A-rollmode");
             leftPad = ((width / 2) * (1 + 1 / (zoomScale * numChans / appParam_dualChanDiv)) - waveformWidth) - (scaledPos / appParam_dualChanDiv);
         } else { // complete waveforms, these ones come centered
@@ -3927,19 +4222,19 @@ function processVisibleWaveform(waveArray, width, channelName = 'CH1') {
     }
 
     if (channelName == 'REF') {
-        if (appParam_horizontalREFZoomLvl > 24) {
+        if (appParam_horizontalREFZoomLvl > 23) {
             leftPad = ((width / 2) * (1 + 1 / (zoomScale * numChans / appParam_dualChanDiv)) - waveformWidth) - (scaledPos / appParam_dualChanDiv);
         } else {
             leftPad = ((width - waveformWidth) / 2) - (scaledPos / appParam_dualChanDiv) + (scaledOffset / numChans);
         }
     } else if (appParam_stopRun == 0) {
-        if (appParam_horizontalSnapshotZoomLvl > 24) {
+        if (appParam_horizontalSnapshotZoomLvl > 23) {
             leftPad = ((width / 2) * (1 + 1 / (zoomScale * numChans / appParam_dualChanDiv)) - waveformWidth) - (scaledPos / appParam_dualChanDiv);
         } else {
             leftPad = ((width - waveformWidth) / 2) - (scaledPos / appParam_dualChanDiv) + (scaledOffset / numChans);
         }
     } else {
-        if (appParam_timeZoomLvl > 24) {
+        if (appParam_isRollMode) {
             leftPad = ((width / 2) * (1 + 1 / (zoomScale * numChans / appParam_dualChanDiv)) - waveformWidth) - (scaledPos / appParam_dualChanDiv);
         } else {
             leftPad = ((width - waveformWidth) / 2) - (scaledPos / appParam_dualChanDiv) + (scaledOffset / numChans);
@@ -4566,7 +4861,50 @@ function drawWaveform(ctx, points, gridBounds, color, dotsLines, lineThickness) 
     ctx.lineWidth = getIntFromString(lineThickness);
     ctx.strokeStyle = color;
     ctx.fillStyle = color;
-    if (dotsLines == 'Dots') {
+
+    if (appParam_superXYMode == 'ON' && dotsLines == 'Lines') {
+        // draw phosphor-like lines
+        let firstVisible = true;
+        for (let i = 0; i < points.length - 1; i++) {
+            const p0 = points[i];
+            const p1 = points[i + 1];
+            const x0 = p0.x;
+            const y0 = p0.y;
+            const x1 = p1.x;
+            const y1 = p1.y;
+            const clipped = clipLine(x0, y0, x1, y1, gridBounds.xMin, gridBounds.xMax, gridBounds.yMin, gridBounds.yMax);
+
+            // distance between points
+            const NORMAL_DISTANCE = 15 / appParam_interpScale; // default 15
+            const NORMAL_THICKNESS = 1;
+            const VARIATION_AMOUNT = 1.5; // default 1.0
+            const dx = x1 - x0;
+            const dy = y1 - y0;
+            const distance = Math.hypot(dx, dy);
+            const safeDistance = Math.max(distance, 0.0001);
+
+            const ratio = NORMAL_DISTANCE / safeDistance;
+            let thickness = NORMAL_THICKNESS * (1 + (ratio - 1) * VARIATION_AMOUNT);
+            thickness = Math.max(0.1, Math.min(thickness, NORMAL_THICKNESS));
+
+            ctx.beginPath();
+            ctx.lineWidth = thickness;
+
+            if (clipped.visible) {
+                if (firstVisible) {
+                    ctx.moveTo(clipped.x0, clipped.y0);
+                    firstVisible = false;
+                } else {
+                    ctx.lineTo(clipped.x0, clipped.y0);
+                }
+                ctx.lineTo(clipped.x1, clipped.y1);
+            } else {
+                firstVisible = true;
+            }
+            ctx.stroke();
+        }
+
+    } else if (dotsLines == 'Dots') {
         // Draw dots
         points.forEach(p => {
             const x = p.x;
@@ -4708,7 +5046,7 @@ function drawTriggerLine(ctx, gridIndex) {
         }
     } else {
         appParam_lastTriggerPos = appParam_triggerLevel;
-        appParam_triggerLineCountdown = 10;
+        appParam_triggerLineCountdown = appParam_superXYMode == 'ON' ? 59 : (appParam_turboMode == '25fps' ? 25 : 10);
         drawHorizontalLine(ctx, (gridCenterY - appParam_triggerVerticalPos * gridHeight), gridBoundsArray[gridIndex], 'white', 5, 1);
     }
 }
@@ -4821,17 +5159,17 @@ function drawText(ctx, text, xPosition, yPosition, fontSize, color, invert = 0, 
     ctx.restore();
 }
 
-// call this function to show a popup message on screen, with a timer of 10 frames to disappear. channelName determines the color and the placement of the message. "ALL" shows message in white at center of the screen
+// call this function to show a popup message on screen, with a timer of 1 second (in frames) to disappear. channelName determines the color and the placement of the message. "ALL" shows message in white at center of the screen
 function showMessage(text, channelName = "ALL") {
     appParam_message = text;
     appParam_lastMessage = '';
     appParam_messageChannel = channelName;
-    appParam_messageCountdown = 10;
+    appParam_messageCountdown = appParam_superXYMode == 'ON' ? 59 : (appParam_turboMode == '25fps' ? 25 : 10);
 }
 
 // function to draw the popup messages
 function drawMessage() {
-    canvas = document.getElementById('plotCanvas');
+    canvas = document.getElementById('hudCanvas');
     context = canvas.getContext('2d');
     const canvasWidth = context.canvas.width;
     const canvasHeight = context.canvas.height;
@@ -4850,7 +5188,7 @@ function drawMessage() {
             }
         } else {
             appParam_lastMessage = appParam_message;
-            appParam_messageCountdown = 10;
+            appParam_messageCountdown = appParam_superXYMode == 'ON' ? 59 : (appParam_turboMode == '25fps' ? 25 : 10);
 
             // Recording: honour a one-shot duration override. drawMessage() resets the
             // countdown when it first sees a new message, so setting it in showMessage()
@@ -5061,13 +5399,18 @@ function writeMeasurements(ctx, channelName, yPosition) {
 function clearAllCanvas() {
     let canvas = document.getElementById('gridCanvas');
     let context = canvas.getContext('2d');
-    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = "black";
+    context.fillRect(0, 0, canvas.width, canvas.height);
 
     canvas = document.getElementById('refCanvas');
     context = canvas.getContext('2d');
     context.clearRect(0, 0, canvas.width, canvas.height);
 
     canvas = document.getElementById('plotCanvas');
+    context = canvas.getContext('2d');
+    context.clearRect(0, 0, canvas.width, canvas.height);
+
+    canvas = document.getElementById('hudCanvas');
     context = canvas.getContext('2d');
     context.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -6410,7 +6753,7 @@ function findCrossing(positionX, waveArray) {
 
 // Main loop
 function doIteration() {
-    let startTime = Date.now();
+    //let startTime = Date.now();
     //console.clear();
     //console.log("Iterating...");
     processParams(); // process parameter data recieved from the oscilloscope
@@ -6446,10 +6789,10 @@ function doIteration() {
     }
     plotGrid(0); // draw the grid if required
     plotREF(0); // draw the REF waveform if required
-    drawMenu(0); // draw the menu if required
     plotData(); // draw the required waveforms
     drawHUD(); //draw all necessary HUD elements and text in the canvas
     drawMessage(); //draw a message (if required)
+    drawMenu(0); // draw the menu if required
 
     //log("ITERATION_TIME: " + (Date.now() - startTime));
 }
@@ -6488,7 +6831,13 @@ function processParams() {
     appParam_currVPD_CH1 = getVoltsDiv(appParam_CH1VoltsZoom, (appParam_CH1Probe == '1x' ? 0 : (appParam_CH1Probe == '10x' ? 1 : 2)), 1);
     appParam_currVPD_CH2 = getVoltsDiv(appParam_CH2VoltsZoom, (appParam_CH2Probe == '1x' ? 0 : (appParam_CH2Probe == '10x' ? 1 : 2)), 1);
 
-    if ((appParam_timeZoomLvl > 24) && (appParam_stopRun == 1)) { // If roll mode and live capturing, reset the trigger position
+    if (appParam_timeZoomLvl > 23 || appParam_superXYMode == 'ON') {
+        appParam_isRollMode = true;
+    } else {
+        appParam_isRollMode = false;
+    }
+
+    if (appParam_isRollMode && appParam_stopRun == 1) { // If roll mode and live capturing, reset the trigger position
         appParam_horizontalCurrentPos = 0;
     }
 
@@ -6514,7 +6863,7 @@ function processParams() {
     if (appParam_Interpolation == 'OFF') { // no interpolation used, no waveform sample increase
         appParam_interpScale = 1;
     } else { // interpolation active, waveform samples increased
-        appParam_interpScale = interpMultiplier;
+        appParam_interpScale = getIntFromString(appParam_InterpolationUpsampling);
     }
 
     // calculate samplerate variables
@@ -6572,7 +6921,7 @@ function processParams() {
     // Get appParam_timeArrowPosition value and normalize it to 0-1 (or -1 if disabled) to properly display it in the grid
     appParam_timeArrowPosition = (-appParam_horizontalCurrentPos / appParam_horizontalWindowWidth) + 0.5; // used for the time position arrow
     appParam_timeArrowPosition = ((appParam_timeArrowPosition < 0.007) ? 0.007 : (appParam_timeArrowPosition > 0.993 ? 0.993 : appParam_timeArrowPosition));
-    if (appParam_timeZoomLvl > 24) {
+    if (appParam_isRollMode) {
         appParam_timeArrowPosition = -1;
     }
 
@@ -6636,8 +6985,6 @@ function processParams() {
         appParam_REFVerticalPos = 0.495;
     }
 
-    const canvas = document.getElementById('plotCanvas');
-    const ctx = canvas.getContext('2d');
     appParam_dataIsNew = trackBufferChangeTime(currentCH1Data);
 }
 
@@ -6697,8 +7044,17 @@ function processWaveforms() {
             currentCH1DataArray = waveformFilter(currentCH1DataArray, appParam_CH1_LPFValue[2], appParam_CH1_LPF);
         }
 
+        // Waveform Averaging/Smoothing (if enabled)
+        if (appParam_acquisitionMode == 'Average') {
+            currentCH1DataArray = waveformAveraging(currentCH1DataArray, appParam_acquisitionAverageSteps, 0);
+        } else if (appParam_acquisitionMode == 'Smoothing') {
+            currentCH1DataArray = waveformFIRSmoothing(currentCH1DataArray, appParam_acquisitionSmoothingSteps, appParam_acquisitionSmoothingWindow);
+        }
+
         // Waveform Interpolation (if enabled)
-        currentCH1DataArray = doInterpolationFixedLength(currentCH1DataArray, appParam_Interpolation, ((currentCH1DataArray.length - 1) * appParam_interpScale) + 1, 'CH1');
+        if (appParam_Interpolation == 'ON') {
+            currentCH1DataArray = doInterpolationFixedLength(currentCH1DataArray, appParam_InterpolationMethod, ((currentCH1DataArray.length - 1) * appParam_interpScale) + 1, 'CH1');
+        }
 
         // Calculate stabilization offset (if trigger Stabilize is enabled)
         if (appParam_triggerSource == 0 && appParam_triggerStabilize == 'ON') {
@@ -6718,8 +7074,17 @@ function processWaveforms() {
                 currentCH2DataArray = waveformFilter(currentCH2DataArray, appParam_CH2_LPFValue[2], appParam_CH2_LPF);
             }
 
+            // Waveform Averaging/Smoothing (if enabled)
+            if (appParam_acquisitionMode == 'Average') {
+                currentCH2DataArray = waveformAveraging(currentCH2DataArray, appParam_acquisitionAverageSteps, 1);
+            } else if (appParam_acquisitionMode == 'Smoothing') {
+                currentCH2DataArray = waveformFIRSmoothing(currentCH2DataArray, appParam_acquisitionSmoothingSteps, appParam_acquisitionSmoothingWindow);
+            }
+
             // Waveform Interpolation (if enabled)
-            currentCH2DataArray = doInterpolationFixedLength(currentCH2DataArray, appParam_Interpolation, ((currentCH2DataArray.length - 1) * appParam_interpScale) + 1, 'CH2');
+            if (appParam_Interpolation == 'ON') {
+                currentCH2DataArray = doInterpolationFixedLength(currentCH2DataArray, appParam_InterpolationMethod, ((currentCH2DataArray.length - 1) * appParam_interpScale) + 1, 'CH2');
+            }
 
             // Calculate stabilization offset (if trigger Stabilize is enabled)
             if (appParam_triggerSource == 1 && appParam_triggerStabilize == 'ON') {
@@ -6743,11 +7108,6 @@ function processWaveforms() {
         if (appParam_isRecording && appParam_bufferUpdated) {
             recPendingCH1Acquired = currentCH1DataArray.slice();
             recPendingCH2Acquired = null; // CH2 follows below, if it is enabled at all
-        }
-
-        // Waveform Averaging (if enabled)
-        if (appParam_acquisitionMode == 'Average') {
-            currentCH1DataArray = waveformAveraging(currentCH1DataArray, appParam_acquisitionModeSteps, 0);
         }
 
         // Get CH1 measurements from currentCH1DataArray
@@ -6777,11 +7137,6 @@ function processWaveforms() {
             // CH2 branch. Only reached when CH2 is enabled; otherwise the null set above stands.
             if (appParam_isRecording && appParam_bufferUpdated) {
                 recPendingCH2Acquired = currentCH2DataArray.slice();
-            }
-
-            // Waveform Averaging (if enabled)
-            if (appParam_acquisitionMode == 'Average') {
-                currentCH2DataArray = waveformAveraging(currentCH2DataArray, appParam_acquisitionModeSteps, 1);
             }
 
             // Get CH2 measurements from currentCH2DataArray
@@ -6952,7 +7307,8 @@ function plotGrid(forceRedraw = 0) {
             const ctx = canvas.getContext('2d');
             const canvasWidth = canvas.width;
             const canvasHeight = canvas.height;
-            ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+            ctx.fillStyle = "black";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
 
             // Draw the grid (or grids if applicable)
             drawGrid(ctx, appParam_gridsToDraw, gridLeftMargin, gridRightMargin, gridTopMargin, gridBottomMargin, gridInterMargin, appParam_gridMode);
@@ -7228,10 +7584,16 @@ function plotData() {
 
 //draws HUD elements and text
 function drawHUD() {
-    const canvas = document.getElementById('plotCanvas');
+    const canvas = document.getElementById('hudCanvas');
     const ctx = canvas.getContext('2d');
+    const canvasWidth = canvas.width;
+    const canvasHeight = canvas.height;
+    ctx.clearRect(0, 0, canvasWidth, canvasHeight);
     const darkGrey = '#303030';
     const lightGrey = '#808080';
+
+
+
 
     // CHANNEL INFO BLOCKS ON BOTTOM BAR
     let posX_infoCH = gridLeftMargin;
@@ -7401,8 +7763,13 @@ function drawHUD() {
         trigTextColor = 'red';
         trigText = 'STOP';
     } else if (appParam_stopRun == 1) {
-        trigTextColor = '#00E020';
-        trigText = appParam_triggerMode == 'Auto' ? 'AUTO' : 'NORMAL';
+        if (appParam_isRollMode) {
+            trigTextColor = '#00E020';
+            trigText = 'ROLL';
+        } else {
+            trigTextColor = '#00E020';
+            trigText = appParam_triggerMode == 'Auto' ? 'AUTO' : 'NORMAL';
+        }
     } else if (appParam_stopRun == 2) {
         trigTextColor = 'yellow';
         trigText = 'WAIT';
@@ -7856,7 +8223,8 @@ function drawZoomMap(ctx, blockWidth, position) {
         ctx.lineWidth = 2;
         ctx.stroke();
     } else {
-        drawText(ctx, "X-Y Mode", position, pos_y + (blockHeight / 2), 15, 'yellow', 0, 1); // buffer change tracker text
+        const XYtext = appParam_superXYMode == 'ON' ? "Super X-Y Mode" : "X-Y Mode";
+        drawText(ctx, XYtext, position, pos_y + (blockHeight / 2), 15, 'yellow', 0, 1); // buffer change tracker text
     }
 
 
@@ -8015,11 +8383,108 @@ function updateDOM() {
         document.getElementById('button-autocalib-start').classList.remove("button-lit");
     }
 
-    if (ITERATION_INTERVAL == 40) {
-        document.getElementById('button-turbo').classList.add("button-lit");
+    if (appParam_superXYMode == 'ON') {
+        document.getElementById('button-superXY-mode').classList.add("button-lit");
+        document.getElementById('plotCanvas').classList.add("blurred");
+        document.getElementById('refCanvas').classList.add("blurred");
     } else {
-        document.getElementById('button-turbo').classList.remove("button-lit");
+        document.getElementById('button-superXY-mode').classList.remove("button-lit");
+        document.getElementById('plotCanvas').classList.remove("blurred");
+        document.getElementById('refCanvas').classList.remove("blurred");
     }
+}
+
+function setColorTheme() {
+    if (appParam_colorTheme == 'Light') {
+        document.getElementById('osc-container').style.backgroundColor = "#999999";
+
+        document.getElementById('test-container').style.backgroundColor = "#999999";
+
+        document.querySelectorAll('.separator').forEach(object => {
+            object.style.backgroundColor = "#929292";
+            object.style.border = "2px solid #2a2a2a";
+            object.style.borderTop = "20px solid #2a2a2a";
+        });
+
+        document.querySelectorAll('.separatorlabelText').forEach(object => {
+            object.classList.add("separatorlabelText-light");
+        });
+
+        document.querySelectorAll('.labelWheelArrow').forEach(object => {
+            object.classList.add("labelTextSymbol-light");
+        });
+
+        document.querySelectorAll('.labelWheelArrowBig').forEach(object => {
+            object.classList.add("labelTextSymbol-light");
+        });
+
+        document.querySelectorAll('.labelTextSymbol').forEach(object => {
+            object.classList.add("labelTextSymbol-light");
+        });
+
+        document.querySelectorAll('.labelText').forEach(object => {
+            object.classList.add("labelText-light");
+        });
+
+        document.querySelectorAll('.demo-Label').forEach(object => {
+            object.classList.add("labelText-light");
+        });
+
+        document.querySelectorAll('.knob').forEach(object => {
+            object.style.border = "2px solid #404040";
+            object.style.boxShadow = "0 0px 15px rgba(0, 0, 0, 0.7)";
+        });
+
+        document.querySelectorAll('.button-function').forEach(object => {
+            object.style.setProperty('--bgColor', '#999999');
+        });
+
+    } else {
+        document.getElementById('osc-container').style.backgroundColor = "#333333";
+
+        document.getElementById('test-container').style.backgroundColor = "#333333";
+
+        document.querySelectorAll('.separator').forEach(object => {
+            object.style.backgroundColor = "#2a2a2a";
+            object.style.border = "2px solid #999999";
+            object.style.borderTop = "20px solid #999999";
+        });
+
+        document.querySelectorAll('.separatorlabelText').forEach(object => {
+            object.classList.remove("separatorlabelText-light");
+        });
+
+        document.querySelectorAll('.labelWheelArrow').forEach(object => {
+            object.classList.remove("labelTextSymbol-light");
+        });
+
+        document.querySelectorAll('.labelWheelArrowBig').forEach(object => {
+            object.classList.remove("labelTextSymbol-light");
+        });
+
+        document.querySelectorAll('.labelTextSymbol').forEach(object => {
+            object.classList.remove("labelTextSymbol-light");
+        });
+
+        document.querySelectorAll('.labelText').forEach(object => {
+            object.classList.remove("labelText-light");
+        });
+
+        document.querySelectorAll('.demo-Label').forEach(object => {
+            object.classList.remove("labelText-light");
+        });
+
+        document.querySelectorAll('.knob').forEach(object => {
+            object.style.border = "2px solid #151515";
+            object.style.boxShadow = "0 0px 15px rgba(0, 0, 0, 0.8)";
+        });
+
+        document.querySelectorAll('.button-function').forEach(object => {
+            object.style.setProperty('--bgColor', '#333333');
+        });
+    }
+    // save theme settings
+    localStorage.setItem('appParam_colorTheme', appParam_colorTheme);
 }
 
 // waits for timeout time to have passed since startingTime
@@ -8106,6 +8571,9 @@ function loadUserSettings() {
     appParam_gridMode = localStorage.getItem('appParam_gridMode') == null ? appParam_gridMode : localStorage.getItem('appParam_gridMode');
     appParam_displayMode = localStorage.getItem('appParam_displayMode') == null ? appParam_displayMode : localStorage.getItem('appParam_displayMode');
     appParam_lineThickness = localStorage.getItem('appParam_lineThickness') == null ? appParam_lineThickness : localStorage.getItem('appParam_lineThickness');
+    appParam_turboMode = localStorage.getItem('appParam_turboMode') == null ? appParam_turboMode : localStorage.getItem('appParam_turboMode');
+    ITERATION_INTERVAL = appParam_turboMode == '25fps' ? 40 : 100;
+    // color theme is loaded at init
 
     appParam_CH1VoltsZoom = localStorage.getItem('appParam_CH1VoltsZoom') == null ? appParam_CH1VoltsZoom : parseInt(localStorage.getItem('appParam_CH1VoltsZoom'));
     appParam_CH2VoltsZoom = localStorage.getItem('appParam_CH2VoltsZoom') == null ? appParam_CH2VoltsZoom : parseInt(localStorage.getItem('appParam_CH2VoltsZoom'));
@@ -8117,13 +8585,14 @@ function loadUserSettings() {
     appParam_triggerLvlAutoManual = localStorage.getItem('appParam_triggerLvlAutoManual') == null ? appParam_triggerLvlAutoManual : localStorage.getItem('appParam_triggerLvlAutoManual');
     appParam_triggerStabilize = localStorage.getItem('appParam_triggerStabilize') == null ? appParam_triggerStabilize : localStorage.getItem('appParam_triggerStabilize');
 
-    ITERATION_INTERVAL = localStorage.getItem('ITERATION_INTERVAL') == null ? ITERATION_INTERVAL : parseInt(localStorage.getItem('ITERATION_INTERVAL'));
+
 }
 
 function saveUserSettings() {
     localStorage.setItem('appParam_gridMode', appParam_gridMode);
     localStorage.setItem('appParam_displayMode', appParam_displayMode);
     localStorage.setItem('appParam_lineThickness', appParam_lineThickness);
+    localStorage.setItem('appParam_turboMode', appParam_turboMode);
 
     localStorage.setItem('appParam_CH1VoltsZoom', appParam_CH1VoltsZoom);
     localStorage.setItem('appParam_CH2VoltsZoom', appParam_CH2VoltsZoom);
@@ -8135,7 +8604,7 @@ function saveUserSettings() {
     localStorage.setItem('appParam_triggerLvlAutoManual', appParam_triggerLvlAutoManual);
     localStorage.setItem('appParam_triggerStabilize', appParam_triggerStabilize);
 
-    localStorage.setItem('ITERATION_INTERVAL', ITERATION_INTERVAL);
+
 }
 
 // Modified stopPlotting to handle queued commands on stop
@@ -8160,14 +8629,15 @@ function toggleMenu01() { // Display Menu
         labels_MenuOptionValues[2] = appParam_displayMode;
         labels_MenuOptionValues[3] = appParam_dotsLines;
         labels_MenuOptionValues[4] = appParam_lineThickness;
-        labels_MenuOptionValues[5] = '';
-        labels_MenuOptionValues[6] = '';
+        labels_MenuOptionValues[5] = appParam_turboMode;
+        labels_MenuOptionValues[6] = appParam_colorTheme;
         labels_MenuOptionValues[7] = '';
         labels_MenuOptionValues[8] = '';
         appParam_menuForceDraw = 1;
     } else {
         appParam_menuPage = 0;
         appParam_menuForceDelete = 1;
+        appParam_lastMenu = 1;
     }
 }
 
@@ -8187,6 +8657,7 @@ function toggleMenu02() { // FFT Menu
         } else {
             appParam_menuPage = 0;
             appParam_menuForceDelete = 1;
+            appParam_lastMenu = 2;
         }
     } else {
         showMessage("NOT AVAILABLE IN X-Y MODE", "ALL");
@@ -8197,17 +8668,18 @@ function toggleMenu03() { // Acquisition Menu
     if (appParam_menuPage != 3) {
         appParam_menuPage = 3;
         labels_MenuOptionValues[1] = appParam_acquisitionMode; // load all variables into the option values array
-        labels_MenuOptionValues[2] = appParam_acquisitionModeSteps;
-        labels_MenuOptionValues[3] = appParam_Interpolation;
-        labels_MenuOptionValues[4] = '';
-        labels_MenuOptionValues[5] = '';
-        labels_MenuOptionValues[6] = '';
+        labels_MenuOptionValues[2] = appParam_acquisitionMode == 'Average' ? appParam_acquisitionAverageSteps : (appParam_acquisitionMode == 'Smoothing' ? appParam_acquisitionSmoothingSteps : "-");
+        labels_MenuOptionValues[3] = appParam_acquisitionMode == 'Smoothing' ? appParam_acquisitionSmoothingWindow : "-";
+        labels_MenuOptionValues[4] = appParam_Interpolation;
+        labels_MenuOptionValues[5] = appParam_InterpolationMethod;
+        labels_MenuOptionValues[6] = appParam_InterpolationUpsampling;
         labels_MenuOptionValues[7] = '';
         labels_MenuOptionValues[8] = '';
         appParam_menuForceDraw = 1;
     } else {
         appParam_menuPage = 0;
         appParam_menuForceDelete = 1;
+        appParam_lastMenu = 3;
     }
 }
 
@@ -8226,6 +8698,7 @@ function toggleMenu04() { // CH1 Menu
     } else {
         appParam_menuPage = 0;
         appParam_menuForceDelete = 1;
+        appParam_lastMenu = 4;
     }
 }
 
@@ -8244,6 +8717,7 @@ function toggleMenu05() { // CH2 Menu
     } else {
         appParam_menuPage = 0;
         appParam_menuForceDelete = 1;
+        appParam_lastMenu = 5;
     }
 }
 
@@ -8263,6 +8737,7 @@ function toggleMenu06() { // Math Menu
         } else {
             appParam_menuPage = 0;
             appParam_menuForceDelete = 1;
+            appParam_lastMenu = 6;
         }
     } else {
         showMessage("NOT AVAILABLE IN X-Y MODE", "ALL");
@@ -8286,6 +8761,7 @@ function toggleMenu07() { // Cursor menu
         } else {
             appParam_menuPage = 0;
             appParam_menuForceDelete = 1;
+            appParam_lastMenu = 7;
         }
     } else {
         showMessage("NOT AVAILABLE IN X-Y MODE", "ALL");
@@ -8308,6 +8784,7 @@ function toggleMenu08() { // Measure Menu
         } else {
             appParam_menuPage = 0;
             appParam_menuForceDelete = 1;
+            appParam_lastMenu = 8;
         }
     } else {
         showMessage("NOT AVAILABLE IN X-Y MODE", "ALL");
@@ -8329,6 +8806,7 @@ function toggleMenu09() { // Trigger Menu
     } else {
         appParam_menuPage = 0;
         appParam_menuForceDelete = 1;
+        appParam_lastMenu = 9;
     }
 }
 
@@ -8348,6 +8826,7 @@ function toggleMenu10() { // REF Waveform Menu
         } else {
             appParam_menuPage = 0;
             appParam_menuForceDelete = 1;
+            appParam_lastMenu = 10;
         }
     } else {
         showMessage("NOT AVAILABLE IN X-Y MODE", "ALL");
@@ -8356,6 +8835,7 @@ function toggleMenu10() { // REF Waveform Menu
 
 function closeAllNonXYMenus() { // closes menus 2, 6, 7, 8, 10
     if (appParam_menuPage == 2 || appParam_menuPage == 6 || appParam_menuPage == 7 || appParam_menuPage == 8 || appParam_menuPage == 10) {
+        appParam_lastMenu = appParam_menuPage;
         appParam_menuPage = 0;
         appParam_menuForceDelete = 1;
     }
@@ -8371,8 +8851,19 @@ function menuButton1() {
             labels_MenuOptionValues[1] = appParam_FFTEnabled;
         }
     } else if (appParam_menuPage == 3) { // Acquisition Menu
-        toggleAcquisitionMode();
+        appParam_acquisitionMode = cycleValueFromTable(appParam_acquisitionMode, table_acquisitionMode);
         labels_MenuOptionValues[1] = appParam_acquisitionMode;
+        if (appParam_acquisitionMode == 'Sample') {
+            labels_MenuOptionValues[2] = "-";
+            labels_MenuOptionValues[3] = "-";
+        } else if (appParam_acquisitionMode == 'Average') {
+            labels_MenuOptionValues[2] = appParam_acquisitionAverageSteps;
+            labels_MenuOptionValues[3] = "-";
+            resetAveragingBuffers();
+        } else if (appParam_acquisitionMode == 'Smoothing') {
+            labels_MenuOptionValues[2] = appParam_acquisitionSmoothingSteps;
+            labels_MenuOptionValues[3] = appParam_acquisitionSmoothingWindow;
+        }
     } else if (appParam_menuPage == 4) { // CH1 Menu
         labels_MenuOptionValues[1] = appParam_CH1Coupling == 'DC' ? 'AC' : 'DC';
         toggleCH1Coupling();
@@ -8396,7 +8887,6 @@ function menuButton1() {
     } else if (appParam_menuPage == 8) { // Measurements menu
         appParam_Meas[1] = cycleValueFromTable(appParam_Meas[1], table_Meas[0]);
         labels_MenuOptionValues[1] = appParam_Meas[1];
-        table_Meas[0]
     } else if (appParam_menuPage == 9) { // Trigger Menu
         toggleTriggerMode();
         labels_MenuOptionValues[1] = appParam_triggerMode;
@@ -8422,8 +8912,13 @@ function menuButton2() {
         }
         labels_MenuOptionValues[2] = appParam_FFTSource;
     } else if (appParam_menuPage == 3) { // Acquisition Menu
-        appParam_acquisitionModeSteps = cycleValueFromTable(appParam_acquisitionModeSteps, table_acquisitionModeSteps);
-        labels_MenuOptionValues[2] = appParam_acquisitionModeSteps;
+        if (appParam_acquisitionMode == 'Average') {
+            appParam_acquisitionAverageSteps = cycleValueFromTable(appParam_acquisitionAverageSteps, table_acquisitionAverageSteps);
+            labels_MenuOptionValues[2] = appParam_acquisitionAverageSteps;
+        } else if (appParam_acquisitionMode == 'Smoothing') {
+            appParam_acquisitionSmoothingSteps = cycleValueFromTable(appParam_acquisitionSmoothingSteps, table_acquisitionSmoothingSteps);
+            labels_MenuOptionValues[2] = appParam_acquisitionSmoothingSteps;
+        }
     } else if (appParam_menuPage == 4) { // CH1 Menu
         toggleCH1Probe();
         labels_MenuOptionValues[2] = appParam_CH1Probe;
@@ -8459,14 +8954,16 @@ function menuButton2() {
 
 function menuButton3() {
     if (appParam_menuPage == 1) { // Display Menu
-        appParam_dotsLines = appParam_dotsLines == 'Lines' ? 'Dots' : 'Lines';
+        appParam_dotsLines = cycleValueFromTable(appParam_dotsLines, table_dotsLines);
         labels_MenuOptionValues[3] = appParam_dotsLines; //update the option value
     } else if (appParam_menuPage == 2) { // FFT Menu
         toggleFFTImpedanceUnits();
         labels_MenuOptionValues[3] = appParam_FFTImpedance[3];
     } else if (appParam_menuPage == 3) { // Acquisition Menu
-        appParam_Interpolation = cycleValueFromTable(appParam_Interpolation, table_Interpolation);
-        labels_MenuOptionValues[3] = appParam_Interpolation; //update the option value
+        if (appParam_acquisitionMode == 'Smoothing') {
+            appParam_acquisitionSmoothingWindow = cycleValueFromTable(appParam_acquisitionSmoothingWindow, table_acquisitionSmoothingWindow);
+            labels_MenuOptionValues[3] = appParam_acquisitionSmoothingWindow;
+        }
     } else if (appParam_menuPage == 4) { // CH1 Menu
         appParam_CH1_LPF = cycleValueFromTable(appParam_CH1_LPF, table_LPFTypes);
         labels_MenuOptionValues[3] = appParam_CH1_LPF;
@@ -8509,7 +9006,8 @@ function menuButton4() {
         }
         labels_MenuOptionValues[4] = appParam_FFTScale;
     } else if (appParam_menuPage == 3) { // Acquisition Menu
-
+        appParam_Interpolation = appParam_Interpolation == 'OFF' ? 'ON' : 'OFF';
+        labels_MenuOptionValues[4] = appParam_Interpolation; //update the option value
     } else if (appParam_menuPage == 4) { // CH1 Menu
         toggleCH1BWLimitUnits();
         labels_MenuOptionValues[4] = appParam_CH1_LPFValue[3];
@@ -8544,12 +9042,14 @@ function menuButton4() {
 
 function menuButton5() {
     if (appParam_menuPage == 1) { // Display Menu
-
+        toggleTurbo();
+        labels_MenuOptionValues[5] = appParam_turboMode;
     } else if (appParam_menuPage == 2) { // FFT Menu
         appParam_FFTWindow = cycleValueFromTable(appParam_FFTWindow, table_FFTWindow);
         labels_MenuOptionValues[5] = appParam_FFTWindow;
     } else if (appParam_menuPage == 3) { // Acquisition Menu
-
+        appParam_InterpolationMethod = cycleValueFromTable(appParam_InterpolationMethod, table_InterpolationMethod);
+        labels_MenuOptionValues[5] = appParam_InterpolationMethod;
     } else if (appParam_menuPage == 4) { // CH1 Menu
 
     } else if (appParam_menuPage == 5) { // CH2 Menu
@@ -8575,12 +9075,15 @@ function menuButton5() {
 
 function menuButton6() {
     if (appParam_menuPage == 1) { // Display Menu
-
+        appParam_colorTheme = appParam_colorTheme == 'Light' ? 'Dark' : 'Light';
+        setColorTheme();
+        labels_MenuOptionValues[6] = appParam_colorTheme;
     } else if (appParam_menuPage == 2) { // FFT Menu
         toggleFFTFindPeaks();
         labels_MenuOptionValues[6] = appParam_FFTFindPeaks.toString().padStart(1, '0');
     } else if (appParam_menuPage == 3) { // Acquisition Menu
-
+        appParam_InterpolationUpsampling = cycleValueFromTable(appParam_InterpolationUpsampling, table_InterpolationUpsampling);
+        labels_MenuOptionValues[6] = appParam_InterpolationUpsampling;
     } else if (appParam_menuPage == 4) { // CH1 Menu
 
     } else if (appParam_menuPage == 5) { // CH2 Menu
@@ -8661,7 +9164,29 @@ function menuButton8() {
 }
 
 function menuButton9() { // "BACK" button
-    if (appParam_menuPage == 1) { // Display Menu
+    if (appParam_menuPage == 0) {
+        if (appParam_lastMenu == 1) {
+            toggleMenu01();
+        } else if (appParam_lastMenu == 2) {
+            toggleMenu02();
+        } else if (appParam_lastMenu == 3) {
+            toggleMenu03();
+        } else if (appParam_lastMenu == 4) {
+            toggleMenu04();
+        } else if (appParam_lastMenu == 5) {
+            toggleMenu05();
+        } else if (appParam_lastMenu == 6) {
+            toggleMenu06();
+        } else if (appParam_lastMenu == 7) {
+            toggleMenu07();
+        } else if (appParam_lastMenu == 8) {
+            toggleMenu08();
+        } else if (appParam_lastMenu == 9) {
+            toggleMenu09();
+        } else if (appParam_lastMenu == 10) {
+            toggleMenu10();
+        }
+    } else if (appParam_menuPage == 1) { // Display Menu
         toggleMenu01();
     } else if (appParam_menuPage == 2) { // FFT Menu
         toggleMenu02();
@@ -9715,6 +10240,9 @@ function toggleXYMode() {
         closeAllNonXYMenus();
     } else {
         appParam_XYmode = 'OFF';
+        if (appParam_superXYMode == 'ON') {
+            toggleSuperXYMode(0); // force disable
+        }
     }
 }
 
@@ -9861,8 +10389,7 @@ function toggleFFTFindPeaks() {
     appParam_FFTFindPeaks = (appParam_FFTFindPeaks + 1) % 13; // 0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12 → 0
 }
 
-function toggleAcquisitionMode() {
-    appParam_acquisitionMode = appParam_acquisitionMode == 'Sample' ? 'Average' : 'Sample';
+function resetAveragingBuffers() {
     // Reset steps when changing mode
     avgStep01 = avgStep02 = avgStep03 = avgStep04 =
         avgStep05 = avgStep06 = avgStep07 = avgStep08 =
@@ -10671,10 +11198,10 @@ function knobHorizontalPosClockwise() {
             showMessage("LIMIT", "ALL");
         }
     } else { // normal horizontal movement for all channels simultaneously
-        if ((appParam_horizontalCurrentPos > appParam_horizontalLimitLeft) && (appParam_timeZoomLvl < 25)) {
+        if ((appParam_horizontalCurrentPos > appParam_horizontalLimitLeft) && (!appParam_isRollMode)) {
             let value = (appParam_horizontalWindowWidth / 360);
             appParam_horizontalCurrentPos = Math.round((appParam_horizontalCurrentPos - value) * 1e12) / 1e12; // fix for floating point precision issue
-        } else if (appParam_timeZoomLvl < 25) { // higher than 24 is roll mode
+        } else if (!appParam_isRollMode) {
             showMessage("LIMIT", "ALL");
         }
     }
@@ -10706,10 +11233,10 @@ function knobHorizontalPosCounterClockwise() {
             showMessage("LIMIT", "ALL");
         }
     } else { // normal horizontal movement for all channels simultaneously
-        if ((appParam_horizontalCurrentPos < appParam_horizontalLimitRight) && (appParam_timeZoomLvl < 25)) {
+        if ((appParam_horizontalCurrentPos < appParam_horizontalLimitRight) && (!appParam_isRollMode)) {
             let value = (appParam_horizontalWindowWidth / 360);
             appParam_horizontalCurrentPos = Math.round((appParam_horizontalCurrentPos + value) * 1e12) / 1e12; // fix for floating point precision issue
-        } else if (appParam_timeZoomLvl < 25) { // higher than 24 is roll mode
+        } else if (!appParam_isRollMode) {
             showMessage("LIMIT", "ALL");
         }
     }
@@ -10799,7 +11326,7 @@ let calib_wait_action = 0;
 let calib_changezoom_action = 0;
 let calib_iterations = 0;
 
-function autoCalibration() { // TO-DO: Improve it! right now takes about 20 minutes to calibrate (previously 30).
+function autoCalibration() { // TO-DO: Improve it! right now takes about 11 minutes to calibrate (previously 30).
     const INTERLEAVE_THRESHOLD = 0.00005;
     const VOFFSET_THRESHOLD = 0.00025;
 
@@ -10823,11 +11350,19 @@ function autoCalibration() { // TO-DO: Improve it! right now takes about 20 minu
             appParam_CH2Coupling = 'AC';
             toggleCH2Coupling();
         }
+        // enable turbo mode for faster calibration
+        if (appParam_turboMode == '10fps') {
+            toggleTurbo();
+        }
 
         // Ensure Average mode is disabled before starting calibration
-        appParam_acquisitionMode = 'Average';
-        appParam_acquisitionModeSteps = 2;
-        toggleAcquisitionMode();
+        appParam_acquisitionMode = 'Sample';
+
+        // Ensure interpolation is disabled
+        appParam_Interpolation = 'OFF';
+
+        // Disable trigger stabilization
+        appParam_triggerStabilize = 'OFF';
 
         hzooms = 2;
         vzooms = 4;
@@ -10838,15 +11373,26 @@ function autoCalibration() { // TO-DO: Improve it! right now takes about 20 minu
             if (vzooms <= 13) {
 
                 // do stuff
-                if (step1done == 0 && step2done == 0 && appParam_acquisitionMode == 'Sample') { // enable average mode only for the interleave calibration
-                    toggleAcquisitionMode();
-                }
+                /*if (step1done == 0 && step2done == 0) { // enable average mode with 2 steps only for the interleave calibration
+                    appParam_acquisitionMode = 'Average';
+                    appParam_acquisitionAverageSteps = 2;
+                    resetAveragingBuffers();
+                }*/
                 let values = getCalibrationValues(currentCH1DataArray, currentCH2DataArray);
-                if (step1done == 0 && step2done == 0 && values.noise1 <= 0.05) { // calibrate interleave in 1 channel mode
+                if (step1done == 1 && step2done == 1) { // proceed to next iteration
+                    vzooms++;
+                    calib_changezoom_action = 1;
+                    calib_iterations++;
+                    step1done = 0;
+                    step2done = 0;
+                } else if (values.noise1 > 0.05) {
+                    //log("signal is too noisy. skipping calib this frame...");
+                    action_rollModeReset = 1;
+                } else if (currentCH1DataArray.length < 200) {
+                    // if samples are not enough, wait for more samples to come (this can happen in roll mode)
+                } else if (step1done == 0 && step2done == 0 && values.noise1 <= 0.05) { // calibrate interleave in 1 channel mode
                     if (Math.abs(values.interleaveOffset) < INTERLEAVE_THRESHOLD) { // if value is good
-                        if (appParam_acquisitionMode == 'Average') {
-                            toggleAcquisitionMode(); // disable average mode for vertical offset calibration
-                        }
+                        appParam_acquisitionMode = 'Sample'; // disable average mode for vertical offset calibration
                         step1done = 1;
                     } else if (values.interleaveOffset < 0) { // value is bad and negative
                         let val = (Math.abs(values.interleaveOffset) < (INTERLEAVE_THRESHOLD * 10)) ? 0.01 : 0.1;
@@ -10865,14 +11411,6 @@ function autoCalibration() { // TO-DO: Improve it! right now takes about 20 minu
                         let val = (Math.abs(values.verticalOffset1) < (VOFFSET_THRESHOLD * 10)) ? 0.1 : 1;
                         appCalib_1ChannelOffset[appParam_CH1VoltsZoom][appParam_timeZoomLvl] = parseFloat((appCalib_1ChannelOffset[appParam_CH1VoltsZoom][appParam_timeZoomLvl] - val).toFixed(2));
                     }
-                } else if (step1done == 1 && step2done == 1) { // proceed to next iteration
-                    vzooms++;
-                    calib_changezoom_action = 1;
-                    calib_iterations++;
-                    step1done = 0;
-                    step2done = 0;
-                } else {
-                    //log("signal is too noisy. skipping calib this frame...");
                 }
 
             } else if (vzooms > 13) {
@@ -10902,7 +11440,18 @@ function autoCalibration() { // TO-DO: Improve it! right now takes about 20 minu
 
                 // do stuff
                 let values = getCalibrationValues(currentCH1DataArray, currentCH2DataArray);
-                if (step1done == 0 && step2done == 0 && values.noise1 <= 0.05) { // calibrate channel 1 vertical offset in 2-channel mode
+                if (step1done == 1 && step2done == 1) { // proceed to next iteration
+                    vzooms++;
+                    calib_changezoom_action = 1;
+                    calib_iterations++;
+                    step1done = 0;
+                    step2done = 0;
+                } else if (values.noise1 > 0.05 || values.noise2 > 0.05) {
+                    //log("signal is too noisy. skipping calib this frame...");
+                    action_rollModeReset = 1;
+                } else if (currentCH1DataArray.length < 200) {
+                    // if samples are not enough, wait for more samples to come (this can happen in roll mode)
+                } else if (step1done == 0 && step2done == 0 && values.noise1 <= 0.05) { // calibrate channel 1 vertical offset in 2-channel mode
                     if (Math.abs(values.verticalOffset1) < VOFFSET_THRESHOLD) { // if value is good
                         step1done = 1;
                     } else if (values.verticalOffset1 < 0) { // value is bad and negative
@@ -10922,14 +11471,6 @@ function autoCalibration() { // TO-DO: Improve it! right now takes about 20 minu
                         let val = (Math.abs(values.verticalOffset2) < (VOFFSET_THRESHOLD * 10)) ? 0.1 : 1;
                         appCalib_2ChannelOffsetCH2[appParam_CH2VoltsZoom][appParam_timeZoomLvl] = parseFloat((appCalib_2ChannelOffsetCH2[appParam_CH2VoltsZoom][appParam_timeZoomLvl] - val).toFixed(2));
                     }
-                } else if (step1done == 1 && step2done == 1) { // proceed to next iteration
-                    vzooms++;
-                    calib_changezoom_action = 1;
-                    calib_iterations++;
-                    step1done = 0;
-                    step2done = 0;
-                } else {
-                    //log("signal is too noisy. skipping calib this frame...");
                 }
 
             } else if (vzooms > 13) {
@@ -10955,9 +11496,7 @@ function autoCalibration() { // TO-DO: Improve it! right now takes about 20 minu
         appParam_selectedChannel = 'CH1';
 
         // Disable Average mode in case it's enabled
-        appParam_acquisitionMode = 'Average';
-        appParam_acquisitionModeSteps = 2;
-        toggleAcquisitionMode();
+        appParam_acquisitionMode = 'Sample';
 
         // reset calibration variables
         action_calibrate = 0;
@@ -10990,9 +11529,7 @@ function autoCalibration() { // TO-DO: Improve it! right now takes about 20 minu
         appParam_selectedChannel = 'CH1';
 
         // Disable Average mode in case it's enabled
-        appParam_acquisitionMode = 'Average';
-        appParam_acquisitionModeSteps = 2;
-        toggleAcquisitionMode();
+        appParam_acquisitionMode = 'Sample';
 
         // reset calibration variables
         action_calibrate = 0;
@@ -11006,7 +11543,7 @@ function autoCalibration() { // TO-DO: Improve it! right now takes about 20 minu
         calib_changezoom_action = 0;
         calib_iterations = 0;
 
-        // reload the saved calibration values
+        // reload the previously saved calibration values
         appCalib_1ChannelInterleave = JSON.parse(localStorage.getItem('appCalib_1ChannelInterleave')) == null ? appCalib_1ChannelInterleave : JSON.parse(localStorage.getItem('appCalib_1ChannelInterleave'));
         appCalib_1ChannelOffset = JSON.parse(localStorage.getItem('appCalib_1ChannelOffset')) == null ? appCalib_1ChannelOffset : JSON.parse(localStorage.getItem('appCalib_1ChannelOffset'));
         appCalib_2ChannelOffsetCH1 = JSON.parse(localStorage.getItem('appCalib_2ChannelOffsetCH1')) == null ? appCalib_2ChannelOffsetCH1 : JSON.parse(localStorage.getItem('appCalib_2ChannelOffsetCH1'));
@@ -11048,9 +11585,15 @@ function abortCalibration() {
 }
 
 function toggleTurbo() {
-    ITERATION_INTERVAL = ITERATION_INTERVAL == 40 ? 100 : 40;
+    appParam_turboMode = appParam_turboMode == '25fps' ? '10fps' : '25fps';
+    if (appParam_superXYMode == 'ON') {
+        ITERATION_INTERVAL = 16.67;
+    } else {
+        ITERATION_INTERVAL = appParam_turboMode == '25fps' ? 40 : 100;
+    }
     clearInterval(iterateInterval);
     iterateInterval = setInterval(doIteration, ITERATION_INTERVAL);
+    action_rollModeReset = 1;
 }
 
 function toggleTestSection() {
@@ -11063,8 +11606,11 @@ function test01() { // TEST FUNCTION - FOR DOING TESTS
 }
 
 function init() {
-    log("DSO2512G WEB APP Beta 42");
-    console.log("DSO2512G WEB APP Beta 42");
+    log("DSO2512G WEB APP Beta 46");
+    console.log("DSO2512G WEB APP Beta 46");
+
+    appParam_colorTheme = localStorage.getItem('appParam_colorTheme') == null ? appParam_colorTheme : localStorage.getItem('appParam_colorTheme');
+    setColorTheme();
 
 
     window.addEventListener("blur", function() {
@@ -11195,7 +11741,7 @@ window.onload = init;
       <br/>
       BETA
       <br/>
-      42
+      46
      </span>
     </div>
     <div id="screen-border">
@@ -11204,6 +11750,8 @@ window.onload = init;
      <canvas height="720" id="refCanvas" width="1280">
      </canvas>
      <canvas height="720" id="plotCanvas" width="1280">
+     </canvas>
+     <canvas height="720" id="hudCanvas" width="1280">
      </canvas>
      <canvas height="720" id="menuCanvas" width="225">
      </canvas>
@@ -11270,6 +11818,9 @@ window.onload = init;
    </div>
    <div id="control-container">
     <!-- Function Buttons -->
+    <button class="button-small-control-2" onclick="captureScreenshot()" style="left: 10px; top: 88px;">
+     PRINT
+    </button>
     <button class="button-small-control button-function" onclick="menuButton1()" style="left: 0px; top: 157px;">
     </button>
     <button class="button-small-control button-function" onclick="menuButton2()" style="left: 0px; top: 229px;">
@@ -11287,7 +11838,9 @@ window.onload = init;
     <button class="button-small-control button-function" onclick="menuButton8()" style="left: 0px; top: 661px;">
     </button>
     <button class="button-small-control-2" onclick="menuButton9()" style="left: 10px; top: 730px;">
-     BACK
+     MENU
+     <br/>
+     ON/OFF
     </button>
     <button class="control-button button-small-control-2" id="button-record" onclick="toggleRecording()" style="left: 10px; top: 810px;" disabled="">
      REC
@@ -11295,15 +11848,15 @@ window.onload = init;
     <!-- Row 1 -->
    </div>
    <div id="button-container">
-    <div id="separator-menu">
+    <div class="separator" id="separator-menu">
     </div>
-    <div id="separator-runcontrol">
+    <div class="separator" id="separator-runcontrol">
     </div>
-    <div id="separator-trigger">
+    <div class="separator" id="separator-trigger">
     </div>
-    <div id="separator-vertical">
+    <div class="separator" id="separator-vertical">
     </div>
-    <div id="separator-horizontal">
+    <div class="separator" id="separator-horizontal">
     </div>
     <span class="separatorlabelText" style="left: 70px; top: 2px;">
      MENU
@@ -11451,10 +12004,10 @@ window.onload = init;
     <button class="button-small" id="button-CH1" onclick="selectChannelCH1()" style="left: 30px; top: 560px;">
      CH1
     </button>
-    <button class="button-small" id="button-CH2" onclick="selectChannelCH2()" style="left: 100px; top: 560px;">
+    <button class="button-small" id="button-CH2" onclick="selectChannelCH2()" style="left: 30px; top: 610px;">
      CH2
     </button>
-    <button class="button-small" id="button-menu-math" onclick="selectChannelMATH1()" style="left: 30px; top: 610px;">
+    <button class="button-small" id="button-menu-math" onclick="selectChannelMATH1()" style="left: 100px; top: 560px;">
      MATH
     </button>
     <button class="button-small" id="button-menu-fft" onclick="selectChannelFFT()" style="left: 100px; top: 610px;">
@@ -11606,8 +12159,10 @@ window.onload = init;
     </button>
     <div class="concave" id="calib-text" style="position: absolute; left: 250px; top: 4px; width: 250px; height: 34px; padding: 3px; font-size: 10px; color: #BBB;">
     </div>
-    <button class="button-small" id="button-turbo" onclick="toggleTurbo()" style="left: 520px; top: 0px;">
-     TURBO
+    <button class="button-small" id="button-superXY-mode" onclick="toggleSuperXYMode()" style="left: 520px; top: 0px;">
+     SUPER
+     <br/>
+     X-Y
     </button>
    </div>
    <div id="test-test-2">
@@ -11619,7 +12174,7 @@ window.onload = init;
     <button disabled="" id="sendBtn" onclick="sendCommand(document.getElementById('commandInput').value); document.getElementById('commandInput').value = ''">
      Send
     </button>
-    <label for="logMode" id="logModeLabel">
+    <label class="demo-Label" for="logMode" id="logModeLabel">
      Log Mode:
     </label>
     <select id="logMode">
@@ -11630,7 +12185,7 @@ window.onload = init;
       Responses Only
      </option>
     </select>
-    <label for="commandFile" id="commandFileLabel">
+    <label class="demo-Label" for="commandFile" id="commandFileLabel">
      Batch File:
     </label>
     <input accept=".txt" id="commandFile" type="file"/>

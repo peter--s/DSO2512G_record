@@ -38,7 +38,7 @@
     },
     {
       "name": "message_duration",
-      "anchor": "            appParam_lastMessage = appParam_message;\n            appParam_messageCountdown = 10;",
+      "anchor": "            appParam_lastMessage = appParam_message;\n            appParam_messageCountdown = appParam_superXYMode == 'ON' ? 59 : (appParam_turboMode == '25fps' ? 25 : 10);",
       "payload_file": "patch/message_duration.js"
     },
     {
@@ -126,7 +126,7 @@
           "replace": true
         },
         {
-          "anchor": "        trigText = 'STOP';\n    } else if (appParam_stopRun == 1) {\n        trigTextColor = '#00E020';\n        trigText = appParam_triggerMode == 'Auto' ? 'AUTO' : 'NORMAL';",
+          "anchor": "        trigText = 'STOP';\n    } else if (appParam_stopRun == 1) {\n        if (appParam_isRollMode) {\n            trigTextColor = '#00E020';\n            trigText = 'ROLL';\n        } else {\n            trigTextColor = '#00E020';\n            trigText = appParam_triggerMode == 'Auto' ? 'AUTO' : 'NORMAL';\n        }",
           "payload_file": "patch/fix_trigger_state_10.js",
           "replace": true
         },
@@ -139,7 +139,7 @@
           "payload_file": "patch/fix_trigger_state_12.js"
         },
         {
-          "anchor": "        if (appParam_timeZoomLvl > 24) { // if roll mode",
+          "anchor": "        } else if (appParam_isRollMode) { // if roll mode",
           "payload_file": "patch/fix_trigger_state_13.js"
         },
         {
@@ -268,7 +268,7 @@
     {
       "name": "record_button",
       "target": "html",
-      "anchor": "    <button class=\"button-small-control-2\" onclick=\"menuButton9()\" style=\"left: 10px; top: 730px;\">\n     BACK\n    </button>",
+      "anchor": "    <button class=\"button-small-control-2\" onclick=\"menuButton9()\" style=\"left: 10px; top: 730px;\">\n     MENU\n     <br/>\n     ON/OFF\n    </button>",
       "payload_file": "patch/record_button.js"
     }
   ]

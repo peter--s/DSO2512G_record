@@ -75,7 +75,7 @@ also records `samplerate_exact` (metadata rounds to whole Hz) and the app's
 `verticalOffsetCH1/CH2` calibration constants, which stay baked into every sample because
 they are what makes the export agree with the scope's own on‑screen readouts.
 
-Those constants are reported for every frame: beta42 has a single data path, so they always
+Those constants are reported for every frame: beta46 has a single data path, so they always
 apply. The sidecar says which capture mode produced the samples rather than claiming
 something untrue, and a mixed capture says which frames they apply to. `signal_sources`
 lists the paths used, and `samplerate_estimated` marks a rate the app could only infer from
@@ -258,7 +258,7 @@ DSO2512G_SR=~/Downloads/DSO2512G_recording_20260826T101500.sr \
 
 | File | Role |
 |------|------|
-| `DSO2512G-APP-beta42.html` + **`oscilloscope_custom.ttf`** | Hi‑Ban's app ([EEVblog thread](https://www.eevblog.com/forum/testgear/new-2ch-pocket-dsosg-sigpeak-dso2512g/msg5897308/#msg5897308)); copy the HTML to `app.html`. The `.ttf` provides the custom on‑screen symbols. |
+| `DSO2512G-APP-beta46.html` + **`oscilloscope_custom.ttf`** | Hi‑Ban's app ([EEVblog thread](https://www.eevblog.com/forum/testgear/new-2ch-pocket-dsosg-sigpeak-dso2512g/msg5897308/#msg5897308)); copy the HTML to `app.html`. The `.ttf` provides the custom on‑screen symbols. |
 | `js_analyzer.py` | Cleans/pretty‑prints (`--clean`), analyses, and (`-e`) splits `app.html` into separate JS/HTML — from [peter--s/js_tools](https://github.com/peter--s/js_tools/). |
 | `app_clean.html` | Pristine cleaned app (no recording feature); produced by `js_analyzer.py --clean`. |
 | `app_clean_extracted.js` / `app_clean_extracted.html` | Extracted JS + HTML shell (no recording feature); produced by `js_analyzer.py -e`. |
@@ -283,7 +283,7 @@ source .venv/bin/activate            # Windows: .venv\Scripts\activate
 pip install beautifulsoup4 esprima jsbeautifier
 
 # pristine working copy
-cp DSO2512G-APP-beta42.html app.html
+cp DSO2512G-APP-beta46.html app.html
 
 # clean + extract + report in one step:
 python3 js_analyzer.py app.html --clean -e -n -g -u > README.txt
@@ -302,7 +302,7 @@ that `prettify()` strips — is applied to both the cleaned HTML and the extract
 
 ## What gets recorded: displayed or acquired
 
-beta42 processes the samples on their way to the screen — a low-pass filter, optional
+beta46 processes the samples on their way to the screen — a low-pass filter, optional
 interpolation (×4 synthetic points), optional averaging, then the vertical position offset. So
 "the samples" is ambiguous, and pressing **REC** asks which you want:
 
