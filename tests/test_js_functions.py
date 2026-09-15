@@ -1157,7 +1157,10 @@ class TestCaptureModeRate(unittest.TestCase):
         got = self.rate("displayed", 4)
         self.assertEqual(got["interp"], 4)
         self.assertEqual(got["sr"], 3200)
-        self.assertEqual(got["full"], 4801 * 4)
+        # (n-1)*interp + 1, not n*interp: interpolation subdivides the INTERVALS between
+        # samples, so 4801 samples (4800 intervals) become 19201, not 19204. This assertion
+        # previously encoded the wrong formula and so hid the bug it was meant to catch.
+        self.assertEqual(got["full"], (4801 - 1) * 4 + 1)
 
     def test_acquired_ignores_interpolation(self):
         """'acquired' forces interpolation off, so a stale interpScale must not leak in."""
@@ -1512,3 +1515,52 @@ class TestDisjointAcquisitions(unittest.TestCase):
         """The short-circuit must not swallow reads that genuinely could overlap."""
         got = self.run_stitch(4, 80, 20, same=True)   # 80 ms at 20 Sa/s = 1.6 samples apart
         self.assertEqual(got["out"], 1, "overlapping reads were skipped as disjoint")
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestInterpolatedSampleRate(unittest.TestCase):
+    """Interpolation scales intervals, not sample counts.
+
+    n samples span n-1 intervals, so an interpolated frame holds (n-1)*interp + 1 - the app's
+    own appParam_intendedSamplesInterpolated. Multiplying the count added a whole sample per
+    step: a real 10 ns/div capture at 2x reported 208,333,333 Sa/s where 200,000,000 was
+    right, stretching its timeline by 4.17%.
+    """
+
+    def rate_for(self, interp, intended=13, tpd=1e-8, base=100_000_000):
+        src = recording_source() + (
+            "\nappParam_intendedSamples = %d;\n"
+            "appParam_interpScale = %d;\n"
+            "appParam_Interpolation = %s;\n"
+            "appParam_currTPD = %r;\n"
+            "appParam_sampleRate = %d;\n"
+            "recCaptureMode = 'displayed';\n"
+            "var s = recSnapshotSettings(100);\n"
+            "__emit(JSON.stringify({full: s.full, sr: s.sr,\n"
+            "  rate: recFrameSampleRate(s, 100), interp: s.interpScale}));\n"
+            % (intended, interp, json.dumps("OFF" if interp == 1 else "ON"), tpd, base)
+        )
+        return run_js_json(src)
+
+    def test_no_interpolation_is_unchanged(self):
+        got = self.rate_for(1)
+        self.assertEqual(got["full"], 13)
+        self.assertAlmostEqual(got["rate"], 100_000_000, delta=1)
+
+    def test_2x_interpolation_doubles_the_rate_exactly(self):
+        got = self.rate_for(2)
+        self.assertEqual(got["full"], 25, "should be (13-1)*2+1, not 13*2")
+        self.assertAlmostEqual(got["rate"], 200_000_000, delta=1)
+
+    def test_4x_interpolation_quadruples_the_rate_exactly(self):
+        got = self.rate_for(4)
+        self.assertEqual(got["full"], 49, "should be (13-1)*4+1, not 13*4")
+        self.assertAlmostEqual(got["rate"], 400_000_000, delta=1)
+
+    def test_the_frame_rate_and_the_derived_rate_agree(self):
+        """s.sr and recFrameSampleRate() must not disagree: one drives the sidecar, the
+        other the .sr header, and a mismatch is invisible until someone measures."""
+        for interp in (1, 2, 4):
+            got = self.rate_for(interp)
+            self.assertAlmostEqual(got["sr"], got["rate"], delta=1,
+                                   msg="sr and recFrameSampleRate disagree at %dx" % interp)
