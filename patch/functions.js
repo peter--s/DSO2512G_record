@@ -94,8 +94,9 @@ function recShowCaptureDialog() {
             'interpolation and averaging if those are selected in the GUI.">' +
             '<input type="radio" name="rec-capture-mode" value="displayed"> Record as displayed</label>' +
             '<label style="display:block; margin-bottom:14px; cursor:pointer;" ' +
-            'title="Post-trim data, before averaging and before the vertical offset. Forces ' +
-            'interpolation off for the duration of the recording even if it is selected in the GUI.">' +
+            'title="Real ADC samples: taken before averaging, smoothing, interpolation and the ' +
+            'vertical offset, but after the low-pass filter if you have one on. Forces interpolation ' +
+            'off for the duration of the recording even if it is selected in the GUI.">' +
             '<input type="radio" name="rec-capture-mode" value="acquired"> Record as acquired</label>' +
             '<label style="display:block; margin-bottom:16px; color:#aaa; cursor:pointer;" ' +
             'title="Use this choice for the rest of this session. Reload the page to be asked again.">' +
@@ -197,7 +198,13 @@ function recSnapshotSettings(len) {
         proc: {
             interpolation: appParam_Interpolation,
             ch1_lpf: appParam_CH1_LPF, ch2_lpf: appParam_CH2_LPF,
-            stabilize: appParam_triggerStabilize
+            stabilize: appParam_triggerStabilize,
+            // beta46's Smoothing is a FIR over the samples, so its window and step count change
+            // what the numbers mean more than anything else here: with 13 steps the values land
+            // between ADC codes. Reported whatever the mode, so a Sample capture says so too.
+            smoothing_steps: (typeof appParam_acquisitionSmoothingSteps === 'undefined') ? null : appParam_acquisitionSmoothingSteps,
+            smoothing_window: (typeof appParam_acquisitionSmoothingWindow === 'undefined') ? null : appParam_acquisitionSmoothingWindow,
+            average_steps: (typeof appParam_acquisitionAverageSteps === 'undefined') ? null : appParam_acquisitionAverageSteps
         },
         // vpos is where this channel's 0 V sits in the captured array, which depends on WHERE the
         // capture was taken. applyOffset() adds appParam_CHnOffset absolutely, and it runs after

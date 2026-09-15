@@ -6767,8 +6767,15 @@ function doIteration() {
             recPendingCH1 = CH1rawPoints.slice();
             recPendingCH2 = (appParam_CH2Enabled == 'ON' && CH2rawPoints.length) ? CH2rawPoints.slice() : null;
         } else {
-            recPendingCH1 = recPendingCH1Acquired;
-            recPendingCH2 = recPendingCH2Acquired;
+            // The acquired snapshot is taken before the trim (so that it is also before
+            // averaging/smoothing, which beta46 moved upstream of it), so apply the app's own
+            // trim now rather than reimplementing its roll-mode, dual-channel and
+            // stabilisation rules. Doing it here rather than at the snapshot means this
+            // frame's appParam_stabilizationOffset is final, so the window matches the one
+            // the app drew. 'acquired' forces interpolation off, so appParam_interpScale is 1
+            // and the trim's interpolated widths collapse to the plain sample counts.
+            recPendingCH1 = recPendingCH1Acquired ? trimWaveArray(recPendingCH1Acquired, 'CH1') : null;
+            recPendingCH2 = recPendingCH2Acquired ? trimWaveArray(recPendingCH2Acquired, 'CH2') : null;
         }
         recPendingSettings = recSnapshotSettings(recPendingCH1 ? recPendingCH1.length : 0);
 
@@ -7043,6 +7050,23 @@ function processWaveforms() {
         if (appParam_CH1_LPF != 'OFF') {
             currentCH1DataArray = waveformFilter(currentCH1DataArray, appParam_CH1_LPFValue[2], appParam_CH1_LPF);
         }
+        // Recording: snapshot CH1 for an 'acquired' capture, taken HERE - after the low-pass
+        // filter, but before averaging/smoothing, interpolation, the trim, and applyOffset.
+        //
+        // beta46 moved averaging and smoothing UPSTREAM of trimWaveArray(); in beta42 they ran
+        // after it, so snapshotting at the trim used to exclude them. The anchor still matched
+        // after the version bump, so the port silently started recording smoothed samples: a
+        // Smoothing capture showed 65 distinct values spaced 0.000308 V where the raw ADC grid
+        // is 0.004 V, i.e. values the instrument never sampled.
+        //
+        // The low-pass filter is deliberately kept: it is a measurement choice about the
+        // signal, whereas averaging and smoothing combine separate acquisitions. The array is
+        // untrimmed at this point, so commit_frame runs the app's own trimWaveArray() on it -
+        // by then this frame's appParam_stabilizationOffset is final.
+        if (appParam_isRecording && appParam_bufferUpdated) {
+            recPendingCH1Acquired = currentCH1DataArray.slice();
+            recPendingCH2Acquired = null; // CH2 follows below, if it is enabled at all
+        }
 
         // Waveform Averaging/Smoothing (if enabled)
         if (appParam_acquisitionMode == 'Average') {
@@ -7073,6 +7097,11 @@ function processWaveforms() {
             if (appParam_CH2_LPF != 'OFF') {
                 currentCH2DataArray = waveformFilter(currentCH2DataArray, appParam_CH2_LPFValue[2], appParam_CH2_LPF);
             }
+            // Recording: the CH2 half of the acquired snapshot, at the matching point in the
+            // CH2 branch - after its low-pass filter, before averaging/smoothing.
+            if (appParam_isRecording && appParam_bufferUpdated) {
+                recPendingCH2Acquired = currentCH2DataArray.slice();
+            }
 
             // Waveform Averaging/Smoothing (if enabled)
             if (appParam_acquisitionMode == 'Average') {
@@ -7099,17 +7128,6 @@ function processWaveforms() {
         // Trim array for display
         currentCH1DataArray = trimWaveArray(currentCH1DataArray, 'CH1');
 
-        // Recording: snapshot CH1 for this frame, from the array as it is right here - after the
-        // trim to the visible window, but before waveformAveraging() and before applyOffset()
-        // adds the vertical position. These are acquired ADC samples; interpolation is forced off
-        // while an 'acquired' recording runs, so the array is 1:1 with what the instrument sent.
-        // A 'displayed' capture wants the fully processed CH1rawPoints instead and is taken later,
-        // in doIteration(), because CH1rawPoints is not assigned until further down this function.
-        if (appParam_isRecording && appParam_bufferUpdated) {
-            recPendingCH1Acquired = currentCH1DataArray.slice();
-            recPendingCH2Acquired = null; // CH2 follows below, if it is enabled at all
-        }
-
         // Get CH1 measurements from currentCH1DataArray
         vpd = appParam_stopRun == 0 ? appParam_snapshotVPD_CH1 : appParam_currVPD_CH1;
         srate = appParam_stopRun == 0 ? appParam_snapshotSampleRate * appParam_interpScale : appParam_sampleRate * appParam_interpScale;
@@ -7132,12 +7150,6 @@ function processWaveforms() {
         if (appParam_CH2Enabled == 'ON') {
             // Trim array for display
             currentCH2DataArray = trimWaveArray(currentCH2DataArray, 'CH2');
-
-            // Recording: the CH2 half of the acquired snapshot, at the matching point in the
-            // CH2 branch. Only reached when CH2 is enabled; otherwise the null set above stands.
-            if (appParam_isRecording && appParam_bufferUpdated) {
-                recPendingCH2Acquired = currentCH2DataArray.slice();
-            }
 
             // Get CH2 measurements from currentCH2DataArray
             vpd = appParam_stopRun == 0 ? appParam_snapshotVPD_CH2 : appParam_currVPD_CH2;
@@ -9326,8 +9338,9 @@ function recShowCaptureDialog() {
             'interpolation and averaging if those are selected in the GUI.">' +
             '<input type="radio" name="rec-capture-mode" value="displayed"> Record as displayed</label>' +
             '<label style="display:block; margin-bottom:14px; cursor:pointer;" ' +
-            'title="Post-trim data, before averaging and before the vertical offset. Forces ' +
-            'interpolation off for the duration of the recording even if it is selected in the GUI.">' +
+            'title="Real ADC samples: taken before averaging, smoothing, interpolation and the ' +
+            'vertical offset, but after the low-pass filter if you have one on. Forces interpolation ' +
+            'off for the duration of the recording even if it is selected in the GUI.">' +
             '<input type="radio" name="rec-capture-mode" value="acquired"> Record as acquired</label>' +
             '<label style="display:block; margin-bottom:16px; color:#aaa; cursor:pointer;" ' +
             'title="Use this choice for the rest of this session. Reload the page to be asked again.">' +
@@ -9429,7 +9442,13 @@ function recSnapshotSettings(len) {
         proc: {
             interpolation: appParam_Interpolation,
             ch1_lpf: appParam_CH1_LPF, ch2_lpf: appParam_CH2_LPF,
-            stabilize: appParam_triggerStabilize
+            stabilize: appParam_triggerStabilize,
+            // beta46's Smoothing is a FIR over the samples, so its window and step count change
+            // what the numbers mean more than anything else here: with 13 steps the values land
+            // between ADC codes. Reported whatever the mode, so a Sample capture says so too.
+            smoothing_steps: (typeof appParam_acquisitionSmoothingSteps === 'undefined') ? null : appParam_acquisitionSmoothingSteps,
+            smoothing_window: (typeof appParam_acquisitionSmoothingWindow === 'undefined') ? null : appParam_acquisitionSmoothingWindow,
+            average_steps: (typeof appParam_acquisitionAverageSteps === 'undefined') ? null : appParam_acquisitionAverageSteps
         },
         // vpos is where this channel's 0 V sits in the captured array, which depends on WHERE the
         // capture was taken. applyOffset() adds appParam_CHnOffset absolutely, and it runs after
