@@ -1394,3 +1394,67 @@ class TestClampedLayoutIsLabelled(unittest.TestCase):
         self.assertEqual(got["clamped"], 0)
         self.assertEqual(got["mode"], "realtime")
         self.assertGreater(got["total"], 6 * 10)
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestZeroGrowthWhilePrevAccumulates(unittest.TestCase):
+    """The sliding-phase form of a poll landing inside one sample period.
+
+    Once the screen is full the accumulated `prev` grows with every merge while each fresh
+    read stays exactly appParam_intendedSamples long, so a zero-advance read arrives SHORTER
+    than prev rather than equal to it. The instrumented capture showed cur=2401 every time
+    against prev=2403..2508 at dt=32-42ms with expect=1 - a shift of 0 that
+    recFindOverlapShift() cannot return (it skips k <= 0) and neither length branch matched.
+    """
+
+    def stitch(self, arrays, rate=20, dt=40):
+        frames = [{"ch1": a, "t": i * dt} for i, a in enumerate(arrays)]
+        src = recording_source() + (
+            "\nvar raw = %s;\n"
+            "var frames = raw.map(function (f) {\n"
+            "  return {ch1: f.ch1, ch2: null, s: {t: f.t, tpd: 10, src: 'acquired', full: 2401}}; });\n"
+            "var r = stitchRollingFrames(frames, %d);\n"
+            "__emit(JSON.stringify({out: r.frames.length, stitched: r.stitched,\n"
+            "  dropped: r.dropped, lens: r.frames.map(function (f) { return f.ch1.length; })}));\n"
+            % (json.dumps(frames), rate)
+        )
+        return run_js_json(src)
+
+    def wave(self, n, off=0):
+        return [round(0.001 * ((i + off) % 400), 6) for i in range(n)]
+
+    def test_shorter_reread_of_an_accumulated_stream_merges(self):
+        """prev=2417, cur=2401 with the window unmoved: cur is prev's last 2401 samples."""
+        prev = self.wave(2417)
+        cur = list(prev[16:])                      # the same window, no advance
+        got = self.stitch([prev, cur])
+        self.assertEqual(got["out"], 1, "shift 0 against a longer prev was not matched")
+        self.assertEqual(got["lens"], [2417], "prev must keep its length, tail replaced")
+
+    def test_the_captured_signature(self):
+        """The real sliding pattern: each read is the LATEST 2401-sample window.
+
+        Some polls land inside a sample period and the window has not moved, so the read
+        repeats - which is the cur=2401 against a longer prev that the DIAG line showed.
+        The whole run is one acquisition and must come back as one frame.
+        """
+        source = self.wave(3000)
+        positions = [0, 0, 16, 16, 34, 34, 50, 68, 68, 85]   # zero advance where repeated
+        seq = [list(source[p:p + 2401]) for p in positions]
+        got = self.stitch(seq)
+        self.assertEqual(got["out"], 1, "the chain still breaks on zero-advance re-reads")
+        # one window plus everything it advanced by
+        self.assertEqual(got["lens"], [2401 + positions[-1]])
+
+    def test_a_shorter_unrelated_frame_is_not_swallowed(self):
+        """Shorter than prev but different content must stay a separate frame."""
+        prev = self.wave(2417)
+        cur = [round(5.0 - 0.001 * i, 6) for i in range(2401)]
+        got = self.stitch([prev, cur])
+        self.assertEqual(got["out"], 2)
+
+    def test_equal_length_case_still_works(self):
+        """The filling-phase form must not regress."""
+        a = self.wave(74)
+        got = self.stitch([a, list(a)])
+        self.assertEqual(got["out"], 1)

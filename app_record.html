@@ -9286,15 +9286,20 @@ function stitchRollingFrames(frames, sampleRate) {
                 shift = k;
             }
         }
-        // A read that returns the SAME length as its predecessor brought no new samples: the
-        // poll landed inside one sample period. That only happens when the sample period is
-        // comparable to the poll interval - at 10 s/div the rate is 20 Sa/s, one sample every
-        // 50 ms, against polls measured as close as 39 ms apart - so it appears at the slowest
-        // timebase and nowhere faster. Neither branch above covers it: the search skips k <= 0
-        // and the filling branch requires growth. Every unmatched pair broke the chain and
-        // started a new output frame, which turned one 2755-read capture into 157 frames with
-        // 137 of its 156 pairs still prefixes of their successor.
-        if (shift < 0 && a.length > 0 && b.length === a.length) {
+        // A poll landing inside one sample period brings no new samples, so the window has not
+        // advanced and the read is the same data again: the shift is 0. That happens where the
+        // sample period is comparable to the poll interval - at 10 s/div the rate is 20 Sa/s,
+        // one sample every 50 ms, against turbo polls measured at 32-42 ms - so it appears at
+        // the slowest timebase and nowhere faster.
+        //
+        // Nothing above covers shift 0: recFindOverlapShift() skips k <= 0, and the filling
+        // branch needs b.length > a.length. The length test here is <=, not ===, because once
+        // the screen is full `prev` is the ACCUMULATED stream and grows with every merge while
+        // each fresh read stays exactly appParam_intendedSamples long. The instrumented capture
+        // showed precisely that: cur=2401 every time against prev=2403..2508, dt=32-42ms,
+        // expect=1. Requiring equal lengths caught only the filling phase and left the sliding
+        // phase breaking once per ~75 reads, each break costing a whole frame.
+        if (shift < 0 && a.length > 0 && b.length <= a.length) {
             const cap = Math.min(slack, Math.floor(b.length / 8));
             if (recOverlapMatches(a, b, 0, 0, 0) ||
                 (cap > 0 && recOverlapMatches(a, b, 0, cap, 0))) {
