@@ -181,8 +181,15 @@ function recSnapshotSettings(len) {
         intended: appParam_intendedSamples,
         // How many samples a COMPLETE frame holds - the denominator of the rate - so that a
         // partial read still gets its acquisition's rate rather than one derived from its own
-        // truncated length. Scaled with interpolation for the same reason as sr.
-        full: appParam_intendedSamples * interp,
+        // truncated length.
+        //
+        // Interpolation scales the INTERVALS, not the count: n samples span n-1 intervals, so
+        // the interpolated count is (n-1)*interp + 1, which is exactly the app's own
+        // appParam_intendedSamplesInterpolated. Multiplying the count instead added one whole
+        // sample per interpolation step and made the rate 4.2% high at 2x and 6.25% at 4x -
+        // a captured 10 ns/div frame reported 208,333,333 Sa/s where 200,000,000 was right,
+        // stretching the timeline by the same fraction.
+        full: Math.round((appParam_intendedSamples - 1) * interp) + 1,
         interpScale: interp,
         acq: appParam_acquisitionMode,
         // Display processing that was active. None of it applies to an 'acquired' capture
