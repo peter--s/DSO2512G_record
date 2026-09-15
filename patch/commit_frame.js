@@ -7,8 +7,15 @@
             recPendingCH1 = CH1rawPoints.slice();
             recPendingCH2 = (appParam_CH2Enabled == 'ON' && CH2rawPoints.length) ? CH2rawPoints.slice() : null;
         } else {
-            recPendingCH1 = recPendingCH1Acquired;
-            recPendingCH2 = recPendingCH2Acquired;
+            // The acquired snapshot is taken before the trim (so that it is also before
+            // averaging/smoothing, which beta46 moved upstream of it), so apply the app's own
+            // trim now rather than reimplementing its roll-mode, dual-channel and
+            // stabilisation rules. Doing it here rather than at the snapshot means this
+            // frame's appParam_stabilizationOffset is final, so the window matches the one
+            // the app drew. 'acquired' forces interpolation off, so appParam_interpScale is 1
+            // and the trim's interpolated widths collapse to the plain sample counts.
+            recPendingCH1 = recPendingCH1Acquired ? trimWaveArray(recPendingCH1Acquired, 'CH1') : null;
+            recPendingCH2 = recPendingCH2Acquired ? trimWaveArray(recPendingCH2Acquired, 'CH2') : null;
         }
         recPendingSettings = recSnapshotSettings(recPendingCH1 ? recPendingCH1.length : 0);
 

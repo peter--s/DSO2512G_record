@@ -13,12 +13,12 @@
     },
     {
       "name": "snapshot_ch1",
-      "anchor": "        currentCH1DataArray = trimWaveArray(currentCH1DataArray, 'CH1');",
+      "anchor": "        // Apply low pass filter (if enabled) ['butterworth', 'bessel', 'chebyshev1', 'chebyshev2', 'elliptic']\n        if (appParam_CH1_LPF != 'OFF') {\n            currentCH1DataArray = waveformFilter(currentCH1DataArray, appParam_CH1_LPFValue[2], appParam_CH1_LPF);\n        }",
       "payload_file": "patch/snapshot_ch1.js"
     },
     {
       "name": "snapshot_ch2",
-      "anchor": "            currentCH2DataArray = trimWaveArray(currentCH2DataArray, 'CH2');",
+      "anchor": "            // Apply low pass filter (if enabled)\n            if (appParam_CH2_LPF != 'OFF') {\n                currentCH2DataArray = waveformFilter(currentCH2DataArray, appParam_CH2_LPFValue[2], appParam_CH2_LPF);\n            }",
       "payload_file": "patch/snapshot_ch2.js"
     },
     {

@@ -1564,3 +1564,74 @@ class TestInterpolatedSampleRate(unittest.TestCase):
             got = self.rate_for(interp)
             self.assertAlmostEqual(got["sr"], got["rate"], delta=1,
                                    msg="sr and recFrameSampleRate disagree at %dx" % interp)
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestAcquiredExcludesSmoothing(unittest.TestCase):
+    """'acquired' must stay on the ADC grid whatever the acquisition mode.
+
+    beta46 moved averaging and smoothing UPSTREAM of trimWaveArray(), where they used to run
+    after it. The snapshot anchor still matched, so the port silently began recording smoothed
+    samples: a real Smoothing capture held 65 distinct values spaced 0.000308 V where the raw
+    grid is 0.004 V - a 13-tap FIR average, i.e. values the instrument never sampled.
+
+    This pins the ORDER rather than the anchor, which is what the version bump actually broke.
+    """
+
+    def pipeline(self, mode, capture):
+        """Run the app's own order: convert -> LPF -> average/smooth -> interp -> trim."""
+        src = recording_source() + ("""
+// a quantised ADC signal: every value is a multiple of the grid step
+var GRID = 0.004;
+var raw = [];
+for (var i = 0; i < 600; i++) raw.push(Math.round(Math.sin(i / 9) * 5) * GRID);
+
+// stand-ins for the app's stages, in beta46's order
+function waveformFIRSmoothing(a, n) {
+    var out = [];
+    for (var i = 0; i < a.length; i++) {
+        var s = 0, c = 0;
+        for (var k = -n; k <= n; k++) { var j = i + k; if (j >= 0 && j < a.length) { s += a[j]; c++; } }
+        out.push(s / c);
+    }
+    return out;
+}
+function trimWaveArray(a) { return a.slice(100, 500); }
+
+var acquisitionMode = %s;
+var arr = raw.slice();                       // convertToWaveArray
+// (low-pass filter would go here)
+var snapshot = arr.slice();                  // <-- where the recorder takes 'acquired'
+if (acquisitionMode === 'Smoothing') arr = waveformFIRSmoothing(arr, 6);
+var displayed = trimWaveArray(arr);          // what the screen shows
+var acquired = trimWaveArray(snapshot);      // what the recorder keeps
+var chosen = (%s === 'displayed') ? displayed : acquired;
+
+function offGrid(a) {
+    var n = 0;
+    for (var i = 0; i < a.length; i++) {
+        if (Math.abs(a[i] / GRID - Math.round(a[i] / GRID)) > 1e-9) n++;
+    }
+    return n;
+}
+__emit(JSON.stringify({len: chosen.length, offGrid: offGrid(chosen),
+                       distinct: chosen.filter(function (v, i, s) { return s.indexOf(v) === i; }).length}));
+""" % (json.dumps(mode), json.dumps(capture)))
+        return run_js_json(src)
+
+    def test_acquired_stays_on_the_adc_grid_with_smoothing_on(self):
+        got = self.pipeline("Smoothing", "acquired")
+        self.assertEqual(got["offGrid"], 0,
+                         "acquired samples were smoothed: they no longer sit on ADC codes")
+
+    def test_displayed_is_smoothed_as_the_screen_shows(self):
+        got = self.pipeline("Smoothing", "displayed")
+        self.assertGreater(got["offGrid"], 0,
+                           "displayed should carry the smoothing the user asked for")
+
+    def test_sample_mode_is_identical_either_way(self):
+        a = self.pipeline("Sample", "acquired")
+        d = self.pipeline("Sample", "displayed")
+        self.assertEqual(a["offGrid"], 0)
+        self.assertEqual(d["offGrid"], 0)
+        self.assertEqual(a["len"], d["len"])
