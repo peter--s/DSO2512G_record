@@ -1458,3 +1458,57 @@ class TestZeroGrowthWhilePrevAccumulates(unittest.TestCase):
         a = self.wave(74)
         got = self.stitch([a, list(a)])
         self.assertEqual(got["out"], 1)
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestDisjointAcquisitions(unittest.TestCase):
+    """Frames too far apart in time to overlap are not stitch failures.
+
+    At 10 ns/div the rate is 100 MS/s, so a 2401-sample frame covers 24 us while the app
+    still polls every ~80 ms: consecutive reads are separate triggered acquisitions 3300x
+    further apart than they are long. A real capture reported expect=7980000 for a frame of
+    2401 samples on every pair, which filled the diagnostic with correct non-matches.
+    """
+
+    def run_stitch(self, n_frames, dt_ms, rate, length=2401, same=False):
+        frames = []
+        for i in range(n_frames):
+            off = 0 if same else i * 37
+            frames.append({"ch1": [round(0.001 * ((j + off) % 400), 6) for j in range(length)],
+                           "t": i * dt_ms})
+        src = recording_source() + (
+            "\nvar raw = %s;\n"
+            "var frames = raw.map(function (f) {\n"
+            "  return {ch1: f.ch1, ch2: null, s: {t: f.t, tpd: 1e-8, src: 'acquired', full: 2401}}; });\n"
+            "var r = stitchRollingFrames(frames, %d);\n"
+            "__emit(JSON.stringify({out: r.frames.length, stitched: r.stitched, dropped: r.dropped,\n"
+            "  failures: (typeof recStitchFailures === 'undefined') ? -1 : recStitchFailures.length}));\n"
+            % (json.dumps(frames), rate)
+        )
+        return run_js_json(src)
+
+    def test_fast_timebase_frames_stay_separate(self):
+        """46 acquisitions 80 ms apart at 100 MS/s must come out as 46 frames."""
+        got = self.run_stitch(6, 80, 100_000_000)
+        self.assertEqual(got["out"], 6)
+        self.assertEqual(got["stitched"], 0)
+
+    def test_disjoint_pairs_are_not_reported_as_failures(self):
+        """The diagnostic must name pairs that ought to have matched, not these."""
+        got = self.run_stitch(6, 80, 100_000_000)
+        self.assertEqual(got["failures"], 0,
+                         "provably disjoint acquisitions were logged as stitch failures")
+
+    def test_identical_content_is_still_not_merged_when_far_apart(self):
+        """Even byte-identical frames are separate events if the clock says so.
+
+        A repeating signal at a fast timebase produces near-identical acquisitions; merging
+        them would invent one continuous capture out of many discrete ones.
+        """
+        got = self.run_stitch(4, 80, 100_000_000, same=True)
+        self.assertEqual(got["out"], 4)
+
+    def test_a_close_pair_is_still_examined(self):
+        """The short-circuit must not swallow reads that genuinely could overlap."""
+        got = self.run_stitch(4, 80, 20, same=True)   # 80 ms at 20 Sa/s = 1.6 samples apart
+        self.assertEqual(got["out"], 1, "overlapping reads were skipped as disjoint")
