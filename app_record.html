@@ -9786,7 +9786,6 @@ function stitchRollingFrames(frames, sampleRate) {
     }
     const out = [];
     let stitched = 0, dropped = 0, worstFrontier = 0;
-    recStitchFailures = [];
     for (let i = 0; i < frames.length; i++) {
         const cur = frames[i];
         const prev = out.length ? out[out.length - 1] : null;
@@ -9797,6 +9796,20 @@ function stitchRollingFrames(frames, sampleRate) {
             continue;
         }
         const a = prev.ch1 || [], b = cur.ch1 || [];
+
+        // Acquisitions that CANNOT overlap are not a failed match. At a fast time/div a frame
+        // covers 12 x tpd of signal - 24 us at 10 ns/div - but still arrives only every ~80 ms,
+        // so consecutive reads are separate triggered acquisitions thousands of times further
+        // apart in time than they are long. No shift could align them: the search would reject
+        // every candidate as k > next.length and the zero-advance test would reject the content.
+        // Skipping them here saves that futile work and, more importantly, keeps the diagnostic
+        // below meaningful - it should name pairs that ought to have matched, not every frame of
+        // a fast-timebase capture.
+        const dtSamples = Math.round(((cur.s.t || 0) - (prev.tLast || 0)) / 1000 * sampleRate);
+        if (isFinite(dtSamples) && dtSamples - Math.max(64, Math.round(b.length * 0.05)) > b.length) {
+            out.push({ ch1: cur.ch1, ch2: cur.ch2, s: cur.s, tLast: cur.s ? cur.s.t : 0 });
+            continue;
+        }
         // Start from what this cycle has already shown, with a modest ceiling until it has
         // shown anything. An exact match is always attempted first, so this is only spent
         // on pairs that genuinely need it.
@@ -10115,6 +10128,7 @@ function exportRecordingSR() {
     // Stitch per acquisition setting, before any rate split - see groupByAcquisition().
     let frames = [];
     let stitched = 0, prefixes = 0;
+    recStitchFailures = []; // once for the whole recording, not once per group
     groupByAcquisition(recordedFrames).forEach((run) => {
         const r = stitchRollingFrames(run.frames, recGroupSampleRate(run.frames));
         stitched += r.stitched; prefixes += r.dropped;
