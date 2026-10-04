@@ -1,15 +1,17 @@
 # Acceptance procedure (hardware)
 
 The automated tests pin the conversion arithmetic. What they cannot do is prove the app
-reads the *right* settings off the instrument — that `appParam_currVPD_CH1` really is CH1's
+reads the *right* settings off the instrument — that `appParam_current_CH1_VPD` really is CH1's
 V/div, that `appParam_CH1Offset` really is where ground sits. Only a known signal through a
 real scope shows that.
 
 Much of this was done against app **beta10** and the captures are committed as fixtures with
-automatic assertions. **Those fixtures pin the .sr format, not the beta42 conversion**: beta42
-moved the zero reference to `offsetDC = Coupling == 'DC' ? 32 : 128` and added per-range
-`appCalib_*` correction tables, so the volts conversion has to be re-verified on hardware
-before any beta42 capture is trusted. That is the first item at the end.
+automatic assertions. **Those fixtures pin the .sr format, not the conversion.** The volts
+reference was re-verified on beta42 hardware (shorted probe tips on DC read +15.23 mV and
++9.71 mV, i.e. 0.19 and 0.12 divisions, confirming `offsetDC = 32`), and beta60 leaves
+`((code − offsetDC) / 200) × verticalScale` untouched. What beta60 *did* change is that
+`appCalib_*` is now written by an in-app self-calibration function, so the corrections baked
+into a recording vary per machine — see the first item at the end.
 
 ## What the built-in generator can and cannot do
 
@@ -289,28 +291,37 @@ after any change to the recording code are Test 8 (demo mode, needs no scope) an
 
 ---
 
-## Outstanding for app beta42
+## Outstanding for app beta60
 
-1. **Re-verify the volts conversion on hardware.** beta42 changed the zero reference
-   (`offsetDC` is 32 for DC coupling, 128 for AC) and applies per-range `appCalib_*` tables to
-   the raw codes. `recToVolts()` is unchanged and its arithmetic is pinned by tests, but
-   nothing proves the *reference* is still right. Feed a known DC level and a known amplitude
-   on each coupling and compare with the instrument's own readout. If the DC reference is
-   wrong, every DC recording is offset by about 3.84 divisions.
-2. **Both capture modes, same signal.** Record the same generator output as `displayed` and as
-   `acquired` with interpolation, the low-pass filter and averaging all off. The two `.sr`
-   files should agree sample for sample; they are proven equivalent in the unit tests only
-   against the app's own `applyOffset`, not against the instrument.
-3. **Roll mode at 40 ms.** `ITERATION_INTERVAL` has a turbo setting that halves the poll
-   period, so the per-read growth the frontier trim measures halves too. The trim measures
-   from the recording itself and should adapt, but it has never been run at 40 ms.
-4. **STOP-mode capture.** `scaleVoltsAtoB()` rescales the displayed array between the snapshot
-   point and `applyOffset()`. The recorder should never commit a frame in STOP (no new data
-   arrives), but that path has not been shown to be unreachable.
+1. **Cross-check the volts conversion against the app's own CSV export.** beta60 added
+   `exportWaveform()` → `generateCSV()`, which writes one `time,volts` line per sample using
+   `waveToVolts(v, vpd) = v * vpd / 0.125` — algebraically the recorder's own `v × 8 × vpd` —
+   applied to `currentCH1DataArray`, i.e. post-trim and pre-`applyOffset`, exactly the
+   `acquired` mode's reference. Export one CSV and record one `.sr` of the same frozen signal
+   and diff them sample for sample. This settles the conversion against the author's code
+   rather than against a bench measurement, and it is the cheapest check in this file.
+2. **Both capture modes, same signal.** Redo the beta46 check on beta60: with `Smoothing` on,
+   an `acquired` capture must land entirely on the ADC grid (`8 × vpd / 200`, 0 off-grid
+   samples) while `displayed` must not. Use a scaling tolerance (`1e-6 + |x/grid| × 1e-6`), not
+   a fixed one — float32 exceeds a fixed `1e-6` at larger values and reports a false "smoothed".
+3. **Y inversion.** New in beta60, and the one stage whose placement the recorder deliberately
+   sits upstream of. Record an inverted channel both ways: `displayed` should come back
+   flipped, `acquired` unflipped, and `ch1.invert` should read `'ON'` in both.
+4. **Self-calibration.** Run the app's self-calibration, then record. `proc.calib` must report
+   non-zero cells matching the range and timebase in use. Then confirm two recordings made
+   either side of a self-calibration run are reconcilable from that field alone.
+5. **The 25 ms iteration.** `ITERATION_INTERVAL` is 100 ms by default, 40 ms at
+   `appParam_refreshRate == '25fps'`, and **25 ms** in super-XY mode — a third value beta60
+   added. The roll-mode frontier trim measures per-read growth from the recording itself and
+   should adapt, but it has only been exercised at 100 ms and 40 ms.
+6. **STOP-mode capture.** `scaleVoltsAtoB()` rescales the displayed array between the snapshot
+   point and `applyOffset()` when `appParam_dataIsNew == false`. The recorder should never
+   commit a frame in STOP (no new data arrives), but that path has not been shown to be
+   unreachable.
 
 ### Making this repeatable with the app's own generator
 
-beta42 can drive the instrument's signal generator (SIG‑GEN), and the hidden test panel — click
+beta60 can drive the instrument's signal generator (SIG‑GEN), and the hidden test panel — click
 the version label in the title bar — has a **Batch File** input that replays a list of commands
 (`sendCommandsFromFile()`). Committing one command file per scenario turns the checks above
 from a hand-tuned session into a repeatable one, which matters because they will need redoing

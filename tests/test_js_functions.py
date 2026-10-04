@@ -1004,7 +1004,7 @@ class TestRateDenominatorIsSourceAware(unittest.TestCase):
     For a raw source that is the acquisition length, so a partial read still carries its
     acquisition's rate. A `WAV` frame is the instrument's rendered screen — a fixed 300
     points at every timebase, never partial — so its own length is the right count.
-    `appParam_intendedSamples` counts raw samples a WAV frame never contains, and using it
+    `appParam_current_intendedSamples` counts raw samples a WAV frame never contains, and using it
     made WAV frames up to sixteen times too fast, compressing them to a fraction of the
     twelve divisions they actually span.
     """
@@ -1045,49 +1045,6 @@ class TestRateDenominatorIsSourceAware(unittest.TestCase):
         wav = self._span(300, 300, 2e-8)
         raw = self._span(25, 25, 2e-8)
         self.assertAlmostEqual(wav["span"], raw["span"], delta=1e-10)
-
-
-class TestFirmwareVersionFix(unittest.TestCase):
-    """The opt-in `fw_version` payload: accept the listed minimum 'or newer'.
-
-    The stock app tests the reply with exact string equality against a single version, so any
-    newer modded firmware is rejected and the app calls stopPlotting(). These cases run the
-    shipped payload inside a reproduction of the app's own check.
-    """
-
-    def decide(self, version_data):
-        if jsengine.find_engine() is None:
-            self.skipTest(jsengine.NO_ENGINE)
-        return jsengine.run_js_json(jsengine.firmware_check_source(version_data))["valid"]
-
-    def test_listed_version_still_accepted(self):
-        self.assertEqual(self.decide("V1.3.0C MOD V9B5"), 1)
-
-    def test_newer_firmware_accepted(self):
-        """The case the fix exists for - V9B6 is rejected by the stock exact-match check."""
-        for v in ("V1.3.0C MOD V9B6", "V1.3.0C MOD V9B7", "V1.3.0C MOD V9B10"):
-            self.assertEqual(self.decide(v), 1, v)
-
-    def test_untrimmed_reply_accepted(self):
-        """versionData is response.slice(4) with no trim; a trailing CR alone used to fail."""
-        for v in ("V1.3.0C MOD V9B6\r", "V1.3.0C MOD V9B6 ", " V1.3.0C MOD V9B6"):
-            self.assertEqual(self.decide(v), 1, repr(v))
-
-    def test_case_insensitive(self):
-        self.assertEqual(self.decide("V1.3.0c mod v9b6"), 1)
-
-    def test_unknown_revision_format_accepted_on_prefix(self):
-        """parseResponseBuffer() only resolves on a 'V1.3.0C' prefix, so this is a real reply."""
-        self.assertEqual(self.decide("V1.3.0C MOD SOMETHING"), 1)
-
-    def test_older_firmware_still_rejected(self):
-        """The gate is loosened, not removed: beta42 needs V9B5 for USB-serial boot mode."""
-        for v in ("V1.3.0C MOD V9B3", "V1.3.0C MOD V9B4"):
-            self.assertEqual(self.decide(v), 0, v)
-
-    def test_non_version_replies_rejected(self):
-        for v in ("GARBAGE", "", "V2.0.0 MOD V9B6"):
-            self.assertEqual(self.decide(v), 0, repr(v))
 
 
 @unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
@@ -1144,8 +1101,8 @@ class TestCaptureModeRate(unittest.TestCase):
 
     def rate(self, mode, interp_scale):
         src = recording_source() + (
-            "\nappParam_sampleRate = 800; appParam_interpScale = %d;\n"
-            "appParam_intendedSamples = 4801;\n"
+            "\nappParam_current_sampleRate = 800; appParam_current_interpScale = %d;\n"
+            "appParam_current_intendedSamples = 4801;\n"
             "recCaptureMode = %s;\n"
             "var s = recSnapshotSettings(10);\n"
             "__emit(JSON.stringify({sr: s.sr, full: s.full, interp: s.interpScale}));\n"
@@ -1404,7 +1361,7 @@ class TestZeroGrowthWhilePrevAccumulates(unittest.TestCase):
     """The sliding-phase form of a poll landing inside one sample period.
 
     Once the screen is full the accumulated `prev` grows with every merge while each fresh
-    read stays exactly appParam_intendedSamples long, so a zero-advance read arrives SHORTER
+    read stays exactly appParam_current_intendedSamples long, so a zero-advance read arrives SHORTER
     than prev rather than equal to it. The instrumented capture showed cur=2401 every time
     against prev=2403..2508 at dt=32-42ms with expect=1 - a shift of 0 that
     recFindOverlapShift() cannot return (it skips k <= 0) and neither length branch matched.
@@ -1522,18 +1479,18 @@ class TestInterpolatedSampleRate(unittest.TestCase):
     """Interpolation scales intervals, not sample counts.
 
     n samples span n-1 intervals, so an interpolated frame holds (n-1)*interp + 1 - the app's
-    own appParam_intendedSamplesInterpolated. Multiplying the count added a whole sample per
+    own appParam_current_intendedSamplesInterpolated. Multiplying the count added a whole sample per
     step: a real 10 ns/div capture at 2x reported 208,333,333 Sa/s where 200,000,000 was
     right, stretching its timeline by 4.17%.
     """
 
     def rate_for(self, interp, intended=13, tpd=1e-8, base=100_000_000):
         src = recording_source() + (
-            "\nappParam_intendedSamples = %d;\n"
-            "appParam_interpScale = %d;\n"
+            "\nappParam_current_intendedSamples = %d;\n"
+            "appParam_current_interpScale = %d;\n"
             "appParam_Interpolation = %s;\n"
-            "appParam_currTPD = %r;\n"
-            "appParam_sampleRate = %d;\n"
+            "appParam_current_TPD = %r;\n"
+            "appParam_current_sampleRate = %d;\n"
             "recCaptureMode = 'displayed';\n"
             "var s = recSnapshotSettings(100);\n"
             "__emit(JSON.stringify({full: s.full, sr: s.sr,\n"
@@ -1635,3 +1592,51 @@ __emit(JSON.stringify({len: chosen.length, offGrid: offGrid(chosen),
         self.assertEqual(a["offGrid"], 0)
         self.assertEqual(d["offGrid"], 0)
         self.assertEqual(a["len"], d["len"])
+
+
+class TestAppStubSymbols(unittest.TestCase):
+    """Every app symbol the test harness stubs must still exist in the app.
+
+    jsengine.APP_STUBS is a second, hand-written copy of the app's global names. Nothing ties it
+    to the real app, so when an app version renames a global the stub keeps declaring the old
+    name and the recorder's own code - which reads the NEW name - is then tested against a
+    variable the app no longer has. beta60 renamed eleven at once, which is what makes this worth
+    a test rather than a comment: without it the suite can pass green while the shipped build
+    throws ReferenceError on the first frame.
+    """
+
+    # Declared by the recorder's own payloads or provided by the browser, so absent from the app.
+    NOT_FROM_THE_APP = {"localStorage"}
+
+    def setUp(self):
+        self.app_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir,
+                                     "app_clean.html")
+        if not os.path.exists(self.app_path):
+            self.skipTest("app_clean.html not present (see README 'Involved Files')")
+        with open(self.app_path, encoding="utf-8") as f:
+            self.app = f.read()
+
+    def stub_symbols(self):
+        """The identifiers APP_STUBS declares, from its `var`/`const`/`function` forms."""
+        names = set()
+        for m in re.finditer(r'\b(?:var|const)\s+([A-Za-z_$][\w$]*)', jsengine.APP_STUBS):
+            names.add(m.group(1))
+        # `var a = 1, b = 2;` - pick up the continuations too.
+        for m in re.finditer(r',\s*([A-Za-z_$][\w$]*)\s*=', jsengine.APP_STUBS):
+            names.add(m.group(1))
+        for m in re.finditer(r'\bfunction\s+([A-Za-z_$][\w$]*)', jsengine.APP_STUBS):
+            names.add(m.group(1))
+        return {n for n in names if n not in self.NOT_FROM_THE_APP}
+
+    def test_stub_is_not_empty(self):
+        """A regex that silently matches nothing would make the real test vacuous."""
+        self.assertGreater(len(self.stub_symbols()), 25)
+
+    def test_every_stubbed_symbol_is_declared_by_the_app(self):
+        missing = []
+        for name in sorted(self.stub_symbols()):
+            # A declaration, not just any mention: a stale name can survive in a comment.
+            if not re.search(r'\b(?:let|var|const|function)\s+%s\b' % re.escape(name), self.app):
+                missing.append(name)
+        self.assertEqual(missing, [],
+                         "stubbed but no longer declared by the app: %s" % ", ".join(missing))

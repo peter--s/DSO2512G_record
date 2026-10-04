@@ -2,7 +2,13 @@
 
 // Variables for recording acquired samples into a sigrok .sr file (for PulseView import)
 let appParam_isRecording = false; // true while a recording is active (RECORD pressed, showing SAVE)
-let appParam_bufferUpdated = false; // raised by trackBufferChangeTime() on each genuinely new frame, consumed by the recorder
+// Raised by trackBufferChangeTime() on each genuinely new frame, consumed (and cleared) by the
+// recorder. beta60 added appParam_dataIsNew, which is the same signal from the same call site, but
+// the recorder keeps its own flag deliberately: it CLEARS the flag when it commits a frame, and the
+// app goes on reading appParam_dataIsNew later in the same iteration - in trimWaveArray(),
+// convertToWaveArray() and the snapshot sync - so consuming the app's copy would corrupt the frame
+// the app is still drawing.
+let appParam_bufferUpdated = false;
 let recPendingCH1 = null; // raw normalised (grid-centre referenced) snapshot of the current new frame (CH1)
 let recPendingCH2 = null; // ditto CH2, or null when CH2 was off for this frame
 let recPendingSettings = null; // acquisition settings in force for the frame being snapshotted (see recSnapshotSettings)

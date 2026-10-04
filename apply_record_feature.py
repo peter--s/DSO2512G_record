@@ -80,6 +80,32 @@ def op_edits(op):
     return [op]
 
 
+def check_guards(text, op):
+    """An op's "require"/"forbid" assertions about the app it is being applied to.
+
+    An anchor proves a piece of text is still present. It proves nothing about what that text
+    now *means*, and that is the failure mode every app version bump so far has produced: the
+    roll-mode threshold changed 24 -> 23 under an intact anchor, interpolation switched from
+    scaling sample counts to scaling intervals, and beta46 moved averaging and smoothing
+    upstream of the trim so an 'acquired' capture silently started recording smoothed samples.
+    Each of those built cleanly and was only caught by reading the app or by inspecting a
+    recording afterwards.
+
+    So an op may also assert the shape of the world around its anchor: "require" strings that
+    must be present and "forbid" strings that must be absent. "forbid" is the more valuable
+    half, because it asserts the *old* world is gone - naming the symbol a rename replaced
+    turns a silent semantic drift into a failed build. Returns a list of complaints.
+    """
+    problems = []
+    for needle in op.get("require", []):
+        if needle not in text:
+            problems.append(f"requires {needle!r}, which is absent")
+    for needle in op.get("forbid", []):
+        if needle in text:
+            problems.append(f"forbids {needle!r}, which is present")
+    return problems
+
+
 def apply_js_ops(text, js_ops, doc_dir, label="js"):
     """Apply each op at its (unique) anchor.
 
@@ -90,6 +116,10 @@ def apply_js_ops(text, js_ops, doc_dir, label="js"):
     change in the app that moves or duplicates it fails loudly rather than landing twice.
     """
     for op in js_ops:
+        for problem in check_guards(text, op):
+            raise SystemExit(f"ERROR: op '{op['name']}' {problem}. "
+                             f"The app has changed in a way this op does not expect; "
+                             f"re-check it against the new version. Aborting.")
         for edit in op_edits(op):
             anchor, payload = edit["anchor"], op_payload(edit, doc_dir)
             n = text.count(anchor)
@@ -151,11 +181,77 @@ def describe_app_fixes(patch):
         return ""
     lines = ["app fixes for --with-app-fixes (default: none applied):"]
     for i, op in enumerate(ops, 1):
-        lines.append(f"  {i}. {op['name']:<14} {op.get('description', '')}")
+        lines.append(f"  {i}. {op['name']:<20} {op.get('description', '')}")
     lines.append("")
-    lines.append("  --with-app-fixes            apply all of them")
-    lines.append("  --with-app-fixes=1,fw_version   apply only the listed ones (numbers or names)")
+    lines.append("  --with-app-fixes          apply all of them")
+    lines.append("  --with-app-fixes=%s   apply only the listed ones (numbers or names)"
+                 % ops[0]["name"])
+    lines.append("")
+    lines.append("  The other eight fixes this patch used to carry were adopted upstream in")
+    lines.append("  beta60 and have been removed; the beta46 branch still has them.")
     return "\n".join(lines)
+
+
+def check_patch(doc_dir, patch, app_file=None):
+    """Report every anchor's match count against one app document, without building anything.
+
+    A census like this has had to be hand-written as a throwaway script at each app version
+    bump; making it a subcommand means the next bump is one command rather than an ad-hoc
+    script, and it reports *all* the breakage at once instead of aborting at the first op.
+    Payloads are deliberately not read, so this works while an op's payload is still being
+    rewritten.
+
+    Returns the number of problems found; 0 means the patch should apply cleanly.
+    """
+    # The app being checked is often not in the project directory - a freshly cleaned build of a
+    # new app version sits wherever it was unpacked - while the patch file always comes from
+    # --dir. So an absolute --app is taken as given, and a relative one resolves against --dir.
+    app_file = app_file or "app_clean.html"
+    path = app_file if os.path.isabs(app_file) else os.path.join(doc_dir, app_file)
+    if not os.path.exists(path):
+        raise SystemExit(f"ERROR: {path} not found. Aborting.")
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+
+    # The --dir default is this script's directory, not the working directory, which has
+    # silently rebuilt the wrong artifact before - so always say what was actually read.
+    version = patch.get("expected_app_version", "(unversioned patch)")
+    print(f"Checking anchors for app {version} against:")
+    print(f"  {path}  ({len(text):,} bytes)")
+    marker = patch.get("app_version_marker")
+    if marker and marker not in text:
+        print(f"  NOTE: this file does not carry {version}'s version marker - it may be a "
+              f"different app version than the patch targets.")
+    print()
+
+    groups = [("js", patch.get("js_ops", [])),
+              ("html", patch.get("html_ops", [])),
+              ("app_fix", patch.get("app_fix_ops", []))]
+    problems = 0
+    print(f"  {'group':<9}{'op':<30}{'count':>6}")
+    print(f"  {'-' * 47}")
+    for label, ops in groups:
+        for op in ops:
+            for edit in op_edits(op):
+                n = text.count(edit["anchor"])
+                flag = "" if n == 1 else "   <== expected 1"
+                if n != 1:
+                    problems += 1
+                print(f"  {label:<9}{edit['name']:<30}{n:>6}{flag}")
+            for problem in check_guards(text, op):
+                problems += 1
+                print(f"  {label:<9}{op['name']:<30}{'':>6}   <== {problem}")
+
+    jszip_marker = patch.get("jszip", {}).get("marker")
+    if jszip_marker is not None:
+        n = text.count(jszip_marker)
+        if n != 1:
+            problems += 1
+        print(f"  {'jszip':<9}{'marker':<30}{n:>6}{'' if n == 1 else '   <== expected 1'}")
+
+    print()
+    print(f"{problems} problem(s)." if problems else "All anchors unique; the patch should apply cleanly.")
+    return problems
 
 
 def apply_record_button(html, patch):
@@ -312,11 +408,16 @@ def main():
     ap = argparse.ArgumentParser(
         description="Build the RECORD/SAVE .sr-export feature version (writes new files; inputs untouched).",
         epilog=epilog, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("mode", choices=["single", "extracted"],
+    ap.add_argument("mode", choices=["single", "extracted", "check"],
                     help="single = app_clean.html -> app_record.html; "
-                         "extracted = app_clean_extracted.{js,html} -> app_record_extracted.{js,html}")
+                         "extracted = app_clean_extracted.{js,html} -> app_record_extracted.{js,html}; "
+                         "check = report every anchor's match count and write nothing")
     ap.add_argument("--dir", default=default_dir,
                     help="project directory containing the target files (default: this script's directory)")
+    ap.add_argument("--app", default=None, metavar="FILE",
+                    help="check mode only: the app file to check anchors against; an absolute "
+                         "path is used as given, a relative one resolves against --dir "
+                         "(default: app_clean.html)")
     ap.add_argument("-n", "--noicon", action="store_true",
                     help="do not add the favicon <link> to the HTML header")
     ap.add_argument("--with-app-fixes", nargs="?", const="ALL", default=None, metavar="LIST",
@@ -328,6 +429,8 @@ def main():
     args = ap.parse_args()
 
     patch = load_patch(args.dir)
+    if args.mode == "check":
+        sys.exit(1 if check_patch(args.dir, patch, args.app) else 0)
     add_icon = not args.noicon
     replace_icon = args.favicon == "replace"
     app_fixes = select_app_fix_ops(patch.get("app_fix_ops", []), args.with_app_fixes)

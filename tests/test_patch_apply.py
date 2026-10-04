@@ -22,7 +22,7 @@ import unittest
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # sha256 of the committed app_record.html, reproduced from the current build inputs.
-BASELINE_SHA256 = "fcc7909470655bf218de8128880e635145141ecedb1f4d605bb8a5dd034fac42"
+BASELINE_SHA256 = "fc53c4fbd8fb3e50b9476d6e93753d24528268ee3480dc5c08fa901966a7a91a"
 
 ARTIFACT = os.path.join(REPO, "app_record.html")
 PATCH_JSON = os.path.join(REPO, "record_feature.patch.json")
@@ -327,19 +327,49 @@ class TestAppFixSelection(unittest.TestCase):
             self.assertNotEqual(out, clean, "fix %d (%s) changed nothing" % (i, op["name"]))
 
     @unittest.skipIf(MISSING, NEED_INPUTS)
-    def test_rounding_and_clamp_are_independent(self):
-        """Both edit FPGA_setTrigger and were one hunk originally, so all four combinations
-        of the two must build - in either order."""
+    def test_multi_unit_buttons_land_on_their_own_menu_pages(self):
+        """Each of the three edits must wire the unit toggler belonging to ITS menu page.
+
+        The app declares 28 byte-identical `multiButtLeft = function() {};` stub pairs, one per
+        menu page, so an anchor that is merely present is not enough: it has to be the pair
+        inside the right `case`. Each anchor therefore carries the tail of that page's own
+        multiCounterClockwise body. A mis-anchored edit would silently give, say, the Bode Plot
+        menu the Channel 1 filter behaviour, which nothing else here would catch.
+        """
         clean = read(CLEAN)
-        for spec in ("trigger_rounding", "trigger_clamp",
-                     "trigger_rounding,trigger_clamp", "trigger_clamp,trigger_rounding"):
-            ops = APPLIER.select_app_fix_ops(self.fix_ops, spec)
-            with contextlib.redirect_stdout(io.StringIO()):
-                out = APPLIER.apply_js_ops(clean, ops, REPO, label="fix")
-            wants_round = "rounding" in spec
-            wants_clamp = "clamp" in spec
-            self.assertEqual("triggerY1 = Math.round(triggerY1);" in out, wants_round, spec)
-            self.assertEqual("const shift = 8 - triggerY2;" in out, wants_clamp, spec)
+        ops = APPLIER.select_app_fix_ops(self.fix_ops, "multi_unit_buttons")
+        self.assertEqual(len(ops), 1)
+        with contextlib.redirect_stdout(io.StringIO()):
+            out = APPLIER.apply_js_ops(clean, ops, REPO, label="fix")
+
+        for sym, toggler in (("appParam_FFTImpedance", "toggleFFTImpedanceUnits"),
+                             ("appParam_CH1_LPFValue", "toggleCH1BWLimitUnits"),
+                             ("appParam_CH2_LPFValue", "toggleCH2BWLimitUnits")):
+            self.assertEqual(out.count("multiButtRight = %s;" % toggler), 1,
+                             "%s must be wired exactly once" % toggler)
+            # The app's own menu-option button already calls each toggler, so count the DELTA
+            # this patch introduces rather than the absolute number: forward twice is one step
+            # back, so the reverse direction adds exactly two calls.
+            call = "                %s();\n" % toggler
+            self.assertEqual(out.count(call) - clean.count(call), 2,
+                             "%s reverse step must add two calls" % toggler)
+
+            # Each wired toggler must sit in the `case` that owns the matching variable. The edit
+            # restates that page's own multiCounterClockwise tail, so the tail has to appear just
+            # above the wiring with no intervening `case` label - which is what pins the edit to
+            # the right menu page out of the 28 identical stub pairs.
+            tail = "%s[3] = %s[0].toString()" % (sym, sym)
+            gap = out[out.rindex(tail):out.index("multiButtRight = %s;" % toggler)]
+            self.assertNotIn("case ", gap,
+                             "%s was wired outside the case holding %s" % (toggler, sym))
+            self.assertLess(len(gap), 1200,
+                            "%s is too far from %s to be in the same case" % (toggler, sym))
+
+        # And the stubs that were replaced are gone from exactly three places.
+        stubs = ("            };\n            multiButtLeft = function() {};\n"
+                 "            multiButtRight = function() {};")
+        self.assertEqual(clean.count(stubs) - out.count(stubs), 3,
+                         "exactly three stub pairs must have been replaced")
 
     @unittest.skipIf(MISSING, NEED_INPUTS)
     def test_fixed_build_differs_and_is_reproducible(self):

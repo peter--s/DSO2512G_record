@@ -11,9 +11,15 @@
             // averaging/smoothing, which beta46 moved upstream of it), so apply the app's own
             // trim now rather than reimplementing its roll-mode, dual-channel and
             // stabilisation rules. Doing it here rather than at the snapshot means this
-            // frame's appParam_stabilizationOffset is final, so the window matches the one
-            // the app drew. 'acquired' forces interpolation off, so appParam_interpScale is 1
+            // frame's appParam_current_stabilizationOffset is final, so the window matches the one
+            // the app drew. 'acquired' forces interpolation off, so appParam_current_interpScale is 1
             // and the trim's interpolated widths collapse to the plain sample counts.
+            //
+            // beta60's trimWaveArray() also branches on appParam_dataIsNew. That stays safe here:
+            // processParams() assigns it once per doIteration() and nothing clears it afterwards,
+            // so calling the trim this late in the same iteration still takes the branch the app
+            // took for this frame. If a future version ever resets it mid-iteration, this call
+            // would silently start trimming to the stopped-mode window instead.
             recPendingCH1 = recPendingCH1Acquired ? trimWaveArray(recPendingCH1Acquired, 'CH1') : null;
             recPendingCH2 = recPendingCH2Acquired ? trimWaveArray(recPendingCH2Acquired, 'CH2') : null;
         }

@@ -75,12 +75,23 @@ also records `samplerate_exact` (metadata rounds to whole Hz) and the app's
 `verticalOffsetCH1/CH2` calibration constants, which stay baked into every sample because
 they are what makes the export agree with the scope's own on‑screen readouts.
 
-Those constants are reported for every frame: beta46 has a single data path, so they always
+Those constants are reported for every frame: beta60 has a single data path, so they always
 apply. The sidecar says which capture mode produced the samples rather than claiming
 something untrue, and a mixed capture says which frames they apply to. `signal_sources`
 lists the paths used, and `samplerate_estimated` marks a rate the app could only infer from
 the frame length and then clamp to the hardware ceiling — 50 ns/div computes 500 MHz and is
 reported as 200 MHz.
+
+The sidecar also carries `proc.calib`, which matters more than its size suggests. beta60 added
+a self-calibration function whose results are stored per voltage range *and* per timebase in
+`localStorage`, and `convertToWaveArray()` adds the matching correction to every raw ADC code
+before normalising it. A recording is therefore no longer reproducible from the instrument and
+the GUI settings alone — the same signal captured on two machines, or on one machine either
+side of a self-calibration run, yields different numbers. `proc.calib` records the corrections
+that were actually in force (the cells for the active range and timebase, plus the interleave
+and FPGA terms that apply in single-channel mode), so a file can be reconciled with another
+later. The full tables are 14 × 31 each and the rest never touched these samples, so only the
+active cells are stored.
 
 ### How time is represented
 
@@ -94,7 +105,7 @@ has to be built out of samples, and these are the rules used.
 
 **A frame's samplerate is `(intended samples − 1) / (12 × time-per-div)`.** This is the app's own rule —
 everywhere it converts a sample index to a time it computes `totalTime = 12 × tpd` and
-divides by `n − 1`, and it draws by stretching the array across the grid. `appParam_sampleRate`
+divides by `n − 1`, and it draws by stretching the array across the grid. `appParam_current_sampleRate`
 is only the top-bar readout, and for `WAV` it is clamped to the hardware ceiling to keep that
 readout sane. Using it stretched WAV frames by 12.5×, because a `WAV` frame is the
 instrument's *rendered screen trace* — a fixed 300 points at any time/div, "already processed
@@ -258,7 +269,7 @@ DSO2512G_SR=~/Downloads/DSO2512G_recording_20260826T101500.sr \
 
 | File | Role |
 |------|------|
-| `DSO2512G-APP-beta46.html` + **`oscilloscope_custom.ttf`** | Hi‑Ban's app ([EEVblog thread](https://www.eevblog.com/forum/testgear/new-2ch-pocket-dsosg-sigpeak-dso2512g/msg5897308/#msg5897308)); copy the HTML to `app.html`. The `.ttf` provides the custom on‑screen symbols. |
+| `DSO2512G-APP-beta60.html` + **`oscilloscope_custom.ttf`** | Hi‑Ban's app ([EEVblog thread](https://www.eevblog.com/forum/testgear/new-2ch-pocket-dsosg-sigpeak-dso2512g/msg5897308/#msg5897308)); copy the HTML to `app.html`. The `.ttf` provides the custom on‑screen symbols. |
 | `js_analyzer.py` | Cleans/pretty‑prints (`--clean`), analyses, and (`-e`) splits `app.html` into separate JS/HTML — from [peter--s/js_tools](https://github.com/peter--s/js_tools/). |
 | `app_clean.html` | Pristine cleaned app (no recording feature); produced by `js_analyzer.py --clean`. |
 | `app_clean_extracted.js` / `app_clean_extracted.html` | Extracted JS + HTML shell (no recording feature); produced by `js_analyzer.py -e`. |
@@ -283,7 +294,7 @@ source .venv/bin/activate            # Windows: .venv\Scripts\activate
 pip install beautifulsoup4 esprima jsbeautifier
 
 # pristine working copy
-cp DSO2512G-APP-beta46.html app.html
+cp DSO2512G-APP-beta60.html app.html
 
 # clean + extract + report in one step:
 python3 js_analyzer.py app.html --clean -e -n -g -u > README.txt
@@ -302,14 +313,29 @@ that `prettify()` strips — is applied to both the cleaned HTML and the extract
 
 ## What gets recorded: displayed or acquired
 
-beta46 processes the samples on their way to the screen — a low-pass filter, optional
-interpolation (×4 synthetic points), optional averaging, then the vertical position offset. So
-"the samples" is ambiguous, and pressing **REC** asks which you want:
+beta60 processes the samples on their way to the screen. In order: a low-pass filter, optional
+averaging or FIR smoothing, optional interpolation (×2/×4 synthetic points), optional Y
+inversion, then the trim to the visible window and the vertical position offset. So "the
+samples" is ambiguous, and pressing **REC** asks which you want:
 
 | | taken from | includes |
 |---|---|---|
-| **as displayed** | `CH1rawPoints`, at the end of `processWaveforms()` | filter, interpolation, averaging, vertical offset — exactly what is drawn |
-| **as acquired** | the array just after `trimWaveArray()` | filter only. Forces interpolation off for the recording and restores your setting afterwards |
+| **as displayed** | `CH1rawPoints`, at the end of `processWaveforms()` | filter, averaging/smoothing, interpolation, Y inversion, vertical offset — exactly what is drawn |
+| **as acquired** | straight after the low-pass filter, trimmed afterwards with the app's own `trimWaveArray()` | filter only. Forces interpolation off for the recording and restores your setting afterwards |
+
+The acquired snapshot is taken at the filter rather than at the trim because beta46 moved
+averaging and smoothing *upstream* of the trim and beta60 kept them there. Snapshotting at the
+trim would therefore mix separate acquisitions into samples labelled as raw: a Smoothing capture
+came back with 563 distinct values spaced 0.0024 V where the ADC grid is 0.04 V — one sample in
+seventeen was a value the instrument had actually measured. Taking it at the filter and running
+the app's own trim afterwards keeps the window identical to the drawn one while leaving the
+numbers untouched. The low-pass filter is deliberately kept in both modes: it is a measurement
+choice about the signal, whereas averaging and smoothing combine distinct acquisitions.
+
+Being upstream of the inversion, an acquired capture of an inverted channel holds the samples
+the ADC produced, not the flipped ones; `ch1.invert` / `ch2.invert` in the sidecar say so. The
+filter's full configuration (`lpf_type`, `lpf_order`, `lpf_hz`) is recorded too, since it shapes
+both modes.
 
 The choice is remembered across sessions in `localStorage`. The dialog also offers *don't ask
 again this session*, which is deliberately **not** persisted — reloading the page always
@@ -370,6 +396,11 @@ python3 apply_record_feature.py single
 #   - the output HTML is re-pointed to app_record_extracted.js
 python3 apply_record_feature.py extracted
 
+# check: report every anchor's match count and write nothing. Run this FIRST against a new
+#        app version - it reports all the breakage at once instead of aborting at the first op.
+python3 apply_record_feature.py check
+python3 apply_record_feature.py check --app /path/to/app_clean_beta60.html
+
 # Optional: operate on a different project directory
 python3 apply_record_feature.py single --dir /path/to/project
 
@@ -393,20 +424,22 @@ the recorder and nothing else — which keeps it reviewable, and proposable upst
 `--help` lists them numbered; `--with-app-fixes` takes either the bare flag (all of them) or a
 comma-separated list of numbers and/or names. Any subset is valid.
 
+This list used to hold nine fixes. **Eight of them were adopted upstream in beta60** after the
+change summary reached the app's author, several in the exact form proposed — the firmware range
+check, `pointer-events: none` on the decorative glyphs, the signal-midpoint 50% (now a separate
+`50%` button using a 1st/99th-percentile midpoint), the `STOP`/`WAIT`/`ROLL`/`TRIG'D`/`AUTO`
+top-bar state, configurable trigger hysteresis (now a 0.00–0.60 div menu item), `Math.round()`
+before the register pack, the band-preserving clamp, and the multipurpose wheel's click arrows.
+They are therefore gone from this patch; the **`beta46` branch** still carries all nine if you
+need them against an older app.
+
 | # | name | fix |
 |---|---|---|
-| 1 | `fw_version` | The firmware reply is tested with **exact string equality**, so any *newer* modded firmware is rejected — and the app then calls `stopPlotting()`, refusing to run at all — even though its own message says "or newer". Accepts `V1.3.0C MOD V9Bn` for n ≥ 5, tolerates the untrimmed reply, and logs the version. **Needed for firmware V9B6 and above.** |
-| 2 | `label_pointer_events` | The 40px push‑to‑50% glyph overlaps the lower half of the rotated trigger LEVEL arrow and, being later in the DOM with no `z-index`, paints on top and swallows its clicks. `.labelTextSymbol` gets `pointer-events: none`; no such glyph has a handler. |
-| 3 | `trigger_50pct` | The 50% button set the level to the channel's **zero reference**, which on a DC-offset signal lands off the waveform so the scope stops triggering — the case the button exists to rescue. Uses 50% of the *signal* (the midpoint between the measured peaks), as Tektronix/Rigol/Siglent do. |
-| 4 | `trigger_state` | The top bar showed the trigger **mode**, printing a green `AUTO` whether or not anything was triggering, so a locked trace and a free‑running one looked identical. Now reports acquisition **state**: `STOP` / `WAIT` / `ROLL` / `TRIG'D` / `AUTO` / `READY`, from a flag latched off the FPGA wait that the app already computed and discarded. The field moves to the right of the top bar with the other trigger items. |
-| 5 | `trigger_hysteresis` | The FPGA trigger hysteresis was hard-coded to 10 codes = **0.4 divisions**, and the band sits entirely on one side of the level, so a rising edge cannot arm near the signal's minimum and a falling edge near its maximum. Exposed on the Trigger menu as a multipurpose‑wheel item, default 5 (0.2 div), 0–20, persisted. |
-| 6 | `trigger_rounding` | `triggerY` is a float and `<< 8` coerces via `ToInt32`, which truncates — so the level was systematically up to one code (0.04 div) low. Rounds first. |
-| 7 | `trigger_clamp` | `triggerY1`/`triggerY2` were clamped to `[8, 250]` **independently**, so near the rails the hysteresis band narrowed and then vanished, silently turning the trigger into a single-level comparator that multi-triggers on noise. Shifts the pair together instead, preserving the band. |
-| 8 | `multi_arrows` | The multipurpose wheel was the only knob without click arrows for single stepping. Adds them, copying the trigger knob's layout. |
-| 9 | `multi_unit_buttons` | The two buttons below the wheel did nothing unless cursors were on, while the unit of the wheel‑adjustable value (CH1/CH2 LP filter frequency, FFT impedance) was reachable only through its own menu slot and only forwards. They now step it in both directions. |
+| 1 | `multi_unit_buttons` | The two buttons below the multipurpose wheel do nothing unless cursors are on, while the unit of the wheel-adjustable value (CH1/CH2 LP filter frequency, FFT impedance) is reachable only through its own menu slot and only forwards. They now step it in both directions. beta60 added a per-menu-page dispatch layer (`multiButtLeft`/`multiButtRight`, guarded by `functionIsEmpty()`) but left all 28 stub pairs empty pending a menu-control refactor; this fills the three that matter, reusing the app's own `toggleCH1BWLimitUnits()` / `toggleCH2BWLimitUnits()` / `toggleFFTImpedanceUnits()` rather than repeating their arithmetic. |
 
-The nine ops together reproduce a hand-verified reference build byte for byte, which is what
-pins the extraction; `tests/test_patch_apply.py` also checks each one applies on its own.
+`tests/test_patch_apply.py` checks the op applies on its own, and — because the app declares 28
+byte-identical `multiButtLeft = function() {};` stub pairs — that each of its three edits lands
+inside the `case` that owns the matching variable rather than merely somewhere that matches.
 
 Notes:
 - **Runtime assets:** keep `oscilloscope_custom.ttf` and `favicon.ico` next to the HTML.
@@ -415,6 +448,14 @@ Notes:
 - The insertions are matched by **unique code anchors**, which are identical in the inline
   `<script>` of `app_clean.html` and in `app_clean_extracted.js`, so the same patch applies
   to both. An anchor that is missing *or* duplicated aborts the build rather than guessing.
+- **An anchor proves text, not meaning.** Every app version bump so far has produced at least
+  one op whose anchor still matched while the code around it had changed meaning — the roll-mode
+  threshold moving 24 → 23, interpolation switching from scaling sample counts to scaling
+  intervals, and beta46 moving averaging and smoothing upstream of the trim so that an
+  `acquired` capture silently began recording smoothed samples. All three built cleanly. An op
+  may therefore also carry `require` (strings that must be present) and `forbid` (strings that
+  must be absent); `forbid` is the more useful half, because naming the symbol a rename replaced
+  turns a silent semantic drift into a failed build. `check` reports these alongside the counts.
 - Ops are insertions by default — the payload lands after the anchor and the anchor survives.
   An op marked `"replace": true` substitutes the payload *for* the anchor instead, which is
   what fixes to existing app code need. Ops carrying `"target": "html"` apply to the HTML

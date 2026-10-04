@@ -69,46 +69,55 @@ def payload(name):
         return f.read()
 
 
-def firmware_payload():
-    """The firmware fix's JS, whichever payload file(s) the patch currently splits it into."""
-    import json as _json
-    with open(os.path.join(REPO, "record_feature.patch.json"), encoding="utf-8") as f:
-        patch = _json.load(f)
-    op = [o for o in patch.get("app_fix_ops", []) if o["name"] == "fw_version"][0]
-    out = []
-    for e in op.get("edits", [op]):
-        # A replace-op payload restates its anchor's context (here, only the version log line),
-        # so it is not part of the acceptance logic this harness exercises.
-        if e.get("replace"):
-            continue
-        with open(os.path.join(REPO, e["payload_file"]), encoding="utf-8") as f:
-            out.append(f.read())
-    return "\n".join(out)
-
-
-def firmware_check_source(version_data):
-    """The app's firmware test with the fw_version fix spliced in, standalone.
-
-    Reproduces the shape of checkFirmwareCompatible(): the app's own exact-match loop, then the
-    fix, then a report of the resulting validity flag. This runs the shipped payload rather than
-    a copy of it, so the truth table is about what actually ships.
-    """
-    return (
-        "var appParam_isFirmwareVersionValid = 0;\n"
-        "function log() {}\n"
-        "var versionData = %s;\n"
-        "if (versionData) {\n"
-        '    const validVersions = ["V1.3.0C MOD V9B5"];\n'
-        "    for (var i = 0; i < validVersions.length; i++) {\n"
-        "        if (versionData == validVersions[i]) {\n"
-        "            appParam_isFirmwareVersionValid = 1;\n"
-        "        }\n"
-        "    }\n"
-        "%s\n"
-        "}\n"
-        "__emit(JSON.stringify({valid: appParam_isFirmwareVersionValid}));\n"
-        % (json.dumps(version_data), firmware_payload())
-    )
+# The app globals the recorder reads, declared standalone so the pure helpers can run in a
+# bare JS engine. This is a SECOND, hand-written copy of the app's symbol names, which can
+# drift from the real app silently - beta60 renamed eleven of them at once. The guard is
+# TestAppStubSymbols in test_js_functions.py, which asserts every name here is still
+# declared by app_clean.html.
+APP_STUBS = (
+    "function log() {}\n"
+    "function showMessage() {}\n"
+    "function findTriggerVolts() { return 0; }\n"
+    "var CH1rawPoints = [], CH2rawPoints = [];\n"
+    # beta60 renamed most of these into a current_/snapshot_ pair. This list is a second,
+    # hand-written copy of the app's symbol names, so it can drift from the real app silently
+    # - test_app_symbols_exist() in test_js_functions.py asserts every name here is still
+    # declared by app_clean.html, which is what makes the copy safe to keep.
+    "var appParam_current_sampleRate = 1, appParam_current_TPD = 1, appParam_timeOffset = 0.5;\n"
+    "var appParam_current_intendedSamples = 4801, appParam_acquisitionMode = 'Sample';\n"
+    "var appParam_acquisitionAverageSteps = 2, appParam_acquisitionSmoothingSteps = 1;\n"
+    "var appParam_acquisitionSmoothingWindow = 'Rectangle';\n"
+    "var appParam_current_CH1_VPD = 1, appParam_current_CH2_VPD = 1;\n"
+    "var appParam_CH1Offset = 0, appParam_CH2Offset = 0, appParam_CH2Enabled = 'OFF';\n"
+    "var appParam_CH1Probe = '1x', appParam_CH2Probe = '1x';\n"
+    "var appParam_CH1Coupling = 'DC', appParam_CH2Coupling = 'DC';\n"
+    "var appParam_CH1_LPF = 'OFF', appParam_CH2_LPF = 'OFF';\n"
+    "var appParam_CH1_LPFType = 'Butterworth', appParam_CH2_LPFType = 'Butterworth';\n"
+    "var appParam_CH1_LPFOrder = 2, appParam_CH2_LPFOrder = 2;\n"
+    "var appParam_CH1_LPFValue = [20, 'MHz', 20000000, '020 MHz'];\n"
+    "var appParam_CH2_LPFValue = [20, 'MHz', 20000000, '020 MHz'];\n"
+    "var appParam_CH1invertY = 'OFF', appParam_CH2invertY = 'OFF';\n"
+    "var appParam_triggerSource = 0, appParam_triggerEdge = 0, appParam_triggerMode = 'Auto';\n"
+    "var appParam_triggerStabilize = 'ON';\n"
+    "var appParam_Interpolation = 'OFF', appParam_current_interpScale = 1;\n"
+    # Self-calibration: the tables convertToWaveArray() biases each raw code with, which
+    # recCalibCell() reports. Shaped as the app declares them (14 ranges x 31 zoom levels).
+    "var appParam_current_timeZoomLvl = 10;\n"
+    "var appParam_CH1VoltsZoom = 0, appParam_CH2VoltsZoom = 0;\n"
+    "var appCalib_1ChannelInterleave = [...Array(14)].map(() => Array(31).fill(0));\n"
+    "var appCalib_1ChannelOffset = [...Array(14)].map(() => Array(31).fill(0));\n"
+    "var appCalib_2ChannelOffsetCH1 = [...Array(14)].map(() => Array(31).fill(0));\n"
+    "var appCalib_2ChannelOffsetCH2 = [...Array(14)].map(() => Array(31).fill(0));\n"
+    "var calib_FPGA = Array(14).fill(0);\n"
+    "var isPlotting = false;\n"
+    "const verticalScale = 1, verticalOffsetCH1 = 0.005, verticalOffsetCH2 = 0.008;\n"
+    "var appParam_message = '', appParam_lastMessage = '', appParam_messageChannel = '';\n"
+    "var appParam_messageCountdown = 0;\n"
+    # localStorage is absent in a bare JS engine; the recorder guards every access, and
+    # this stub lets the guarded paths run rather than throw.
+    "var localStorage = { _v: {}, getItem: function (k) { return this._v[k] || null; },"
+    " setItem: function (k, v) { this._v[k] = String(v); } };\n"
+)
 
 
 def recording_source(emit_trigger_channel=False):
@@ -123,31 +132,7 @@ def recording_source(emit_trigger_channel=False):
         before = "const recordEmitTriggerChannel = false;"
         assert src.count(before) == 1, "recordEmitTriggerChannel declaration not found"
         src = src.replace(before, "const recordEmitTriggerChannel = true;")
-    stubs = (
-        "function log() {}\n"
-        "function showMessage() {}\n"
-        "function findTriggerVolts() { return 0; }\n"
-        "var CH1rawPoints = [], CH2rawPoints = [];\n"
-        "var appParam_sampleRate = 1, appParam_currTPD = 1, appParam_timeOffset = 0.5;\n"
-        "var appParam_intendedSamples = 4801, appParam_acquisitionMode = 'Sample';\n"
-        "var appParam_currVPD_CH1 = 1, appParam_currVPD_CH2 = 1;\n"
-        "var appParam_CH1Offset = 0, appParam_CH2Offset = 0, appParam_CH2Enabled = 'OFF';\n"
-        "var appParam_CH1Probe = '1x', appParam_CH2Probe = '1x';\n"
-        "var appParam_CH1Coupling = 'DC', appParam_CH2Coupling = 'DC';\n"
-        "var appParam_CH1_LPF = 'OFF', appParam_CH2_LPF = 'OFF';\n"
-        "var appParam_triggerSource = 0, appParam_triggerEdge = 0, appParam_triggerMode = 'Auto';\n"
-        "var appParam_triggerStabilize = 'ON';\n"
-        "var appParam_Interpolation = 'OFF', appParam_interpScale = 1;\n"
-        "var isPlotting = false;\n"
-        "const verticalScale = 1, verticalOffsetCH1 = 0.005, verticalOffsetCH2 = 0.008;\n"
-        "var appParam_message = '', appParam_lastMessage = '', appParam_messageChannel = '';\n"
-        "var appParam_messageCountdown = 0;\n"
-        # localStorage is absent in a bare JS engine; the recorder guards every access, and
-        # this stub lets the guarded paths run rather than throw.
-        "var localStorage = { _v: {}, getItem: function (k) { return this._v[k] || null; },"
-        " setItem: function (k, v) { this._v[k] = String(v); } };\n"
-    )
-    return stubs + src
+    return APP_STUBS + src
 
 
 # Enough of JSZip and the DOM for exportRecordingSegment() to run to completion and record

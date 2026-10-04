@@ -23,7 +23,7 @@ function recStartRecording() {
     recSavedInterpolation = null;
     if (recCaptureMode === 'acquired' && appParam_Interpolation !== 'OFF') {
         // Interpolation runs upstream of the snapshot point, so an 'acquired' capture would
-        // otherwise contain synthetic points. The app recomputes appParam_interpScale from this
+        // otherwise contain synthetic points. The app recomputes appParam_current_interpScale from this
         // on the next processParams(), which happens before any frame can be committed.
         recSavedInterpolation = appParam_Interpolation;
         appParam_Interpolation = 'OFF';
@@ -37,7 +37,7 @@ function recStartRecording() {
     recPendingCH2Acquired = null;
     recPendingSettings = null;
     recDroppedFrames = 0;
-    recordSampleRate = appParam_sampleRate; // .sr carries a single samplerate; capture it now
+    recordSampleRate = appParam_current_sampleRate; // .sr carries a single samplerate; capture it now
     appParam_isRecording = true;
     btn.textContent = "SAVE";
     btn.classList.add('button-lit');
@@ -143,8 +143,8 @@ function recShowMessage(text) {
 
 // Samples per second for one frame, using the app's own rule.
 //
-// The app now agrees: appParam_sampleRate is
-//     (table_timeZoomSamples[lvl] / dualChanDiv) / 12 / currTPD
+// The app now agrees: appParam_current_sampleRate is
+//     (table_timeZoomSamples[lvl] / appParam_current_numChans) / 12 / appParam_current_TPD
 // which is algebraically this same rule, so a complete frame occupies exactly its twelve
 // divisions. (It was derived from the array's own length in older app versions, and clamped,
 // which is what this function was written to work around.)
@@ -162,6 +162,50 @@ function recFrameSampleRate(s, length) {
     return (Math.max(2, full) - 1) / (12 * tpd);
 }
 
+// null for a setting this app version does not have, so the sidecar stays valid JSON and a
+// missing field is distinguishable from one that is genuinely off.
+function recOpt(value) {
+    return (typeof value === 'undefined') ? null : value;
+}
+
+// The app's self-calibration corrections that were actually applied to this frame's samples.
+//
+// beta60 added a self-calibration function whose results live in localStorage as per-range,
+// per-timebase tables, and convertToWaveArray() adds the matching cell to every raw code before
+// normalising. That makes a recording user-specific for the first time: the same signal captured
+// on two machines yields different numbers, with nothing in the file to explain the difference.
+// Only the cells in force are recorded - the tables are 14x31 each, and the rest did not touch
+// these samples. Everything is read defensively so an app version without self-calibration (or a
+// test stub) simply reports nulls instead of throwing mid-recording.
+function recCalibCell() {
+    const cell = function (table, range, lvl) {
+        if (typeof table === 'undefined' || !table || !table[range]) return null;
+        const v = table[range][lvl];
+        return (typeof v === 'number' && isFinite(v)) ? v : null;
+    };
+    // convertToWaveArray() indexes these tables with
+    //     appParam_dataIsNew == false ? appParam_snapshot_timeZoomLvl : appParam_current_timeZoomLvl
+    // and a frame is only ever committed while appParam_dataIsNew is true, so the 'current' level
+    // is the one that was actually used. (The two are equal during a live recording anyway: the
+    // snapshot block copies current -> snapshot on every new frame.)
+    const lvl = appParam_current_timeZoomLvl;
+    const r1 = appParam_CH1VoltsZoom, r2 = appParam_CH2VoltsZoom;
+    const dual = (appParam_CH2Enabled == 'ON');
+    const out = { dual_channel: dual, range_ch1: r1, range_ch2: r2, zoom_level: lvl };
+    if (dual) {
+        out.offset_ch1 = cell(typeof appCalib_2ChannelOffsetCH1 !== 'undefined' ? appCalib_2ChannelOffsetCH1 : null, r1, lvl);
+        out.offset_ch2 = cell(typeof appCalib_2ChannelOffsetCH2 !== 'undefined' ? appCalib_2ChannelOffsetCH2 : null, r2, lvl);
+    } else {
+        // Single-channel mode interleaves both ADCs into CH1, so it carries its own offset table
+        // plus an interleave correction, and an extra FPGA term at the faster timebases.
+        out.offset_ch1 = cell(typeof appCalib_1ChannelOffset !== 'undefined' ? appCalib_1ChannelOffset : null, r1, lvl);
+        out.interleave = cell(typeof appCalib_1ChannelInterleave !== 'undefined' ? appCalib_1ChannelInterleave : null, r1, lvl);
+        out.fpga = (lvl <= 10 && typeof calib_FPGA !== 'undefined' && calib_FPGA &&
+                    typeof calib_FPGA[r1] === 'number') ? calib_FPGA[r1] : null;
+    }
+    return out;
+}
+
 // Captures the acquisition settings in force for the frame currently being committed.
 // processParams() runs before processWaveforms() in doIteration(), and CH1/CH2 arrive in the same
 // FPGA read, so these values belong to THIS frame's samples rather than a neighbour's.
@@ -169,28 +213,28 @@ function recSnapshotSettings(len) {
     // Interpolation inserts synthetic points before the trim, so a 'displayed' frame is
     // interpScale times longer than the acquisition and its samples arrive interpScale times
     // faster. 'acquired' frames are captured with interpolation forced off, so the factor is 1.
-    const interp = (recCaptureMode === 'displayed' && isFinite(appParam_interpScale)) ? appParam_interpScale : 1;
+    const interp = (recCaptureMode === 'displayed' && isFinite(appParam_current_interpScale)) ? appParam_current_interpScale : 1;
     return {
         t: recPendingTime,                  // performance.now() when the frame was detected
-        sr: appParam_sampleRate * interp,   // Sa/s for this frame, as captured
-        tpd: appParam_currTPD,              // s/div
+        sr: appParam_current_sampleRate * interp,   // Sa/s for this frame, as captured
+        tpd: appParam_current_TPD,              // s/div
         len: len,
         trigIdx: Math.max(0, Math.min(len - 1, Math.round(appParam_timeOffset * (len - 1)))),
         // What the samples mean, and the grouping key: changing it mid-recording changes the
         // meaning of the numbers, so it must split a segment exactly as a rate change does.
         src: recCaptureMode,
-        intended: appParam_intendedSamples,
+        intended: appParam_current_intendedSamples,
         // How many samples a COMPLETE frame holds - the denominator of the rate - so that a
         // partial read still gets its acquisition's rate rather than one derived from its own
         // truncated length.
         //
         // Interpolation scales the INTERVALS, not the count: n samples span n-1 intervals, so
         // the interpolated count is (n-1)*interp + 1, which is exactly the app's own
-        // appParam_intendedSamplesInterpolated. Multiplying the count instead added one whole
+        // appParam_current_intendedSamplesInterpolated. Multiplying the count instead added one whole
         // sample per interpolation step and made the rate 4.2% high at 2x and 6.25% at 4x -
         // a captured 10 ns/div frame reported 208,333,333 Sa/s where 200,000,000 was right,
         // stretching the timeline by the same fraction.
-        full: Math.round((appParam_intendedSamples - 1) * interp) + 1,
+        full: Math.round((appParam_current_intendedSamples - 1) * interp) + 1,
         interpScale: interp,
         acq: appParam_acquisitionMode,
         // Display processing that was active. None of it applies to an 'acquired' capture
@@ -199,6 +243,13 @@ function recSnapshotSettings(len) {
             interpolation: appParam_Interpolation,
             ch1_lpf: appParam_CH1_LPF, ch2_lpf: appParam_CH2_LPF,
             stabilize: appParam_triggerStabilize,
+            // beta60 inserted invertY between interpolation and the trim, so a 'displayed' capture
+            // carries the inversion while 'acquired' snapshots upstream of it and holds the samples
+            // the ADC actually produced. Recorded per channel in ch1/ch2 below, since that is where
+            // it applies - without it the sign of an inverted channel's recording is unknowable.
+            //
+            // The self-calibration corrections already baked into these samples.
+            calib: recCalibCell(),
             // beta46's Smoothing is a FIR over the samples, so its window and step count change
             // what the numbers mean more than anything else here: with 13 steps the values land
             // between ADC codes. Reported whatever the mode, so a Sample capture says so too.
@@ -211,13 +262,27 @@ function recSnapshotSettings(len) {
         // the snapshot point but before CH1rawPoints is final - so a 'displayed' frame carries the
         // vertical position and must have it subtracted back out, while an 'acquired' frame never
         // received it and is already referenced to ground.
-        ch1: { vpd: appParam_currVPD_CH1, vpos: (recCaptureMode === 'displayed' ? appParam_CH1Offset : 0), probe: appParam_CH1Probe, coupling: appParam_CH1Coupling, lpf: appParam_CH1_LPF },
-        ch2: { on: (appParam_CH2Enabled == 'ON'), vpd: appParam_currVPD_CH2, vpos: (recCaptureMode === 'displayed' ? appParam_CH2Offset : 0), probe: appParam_CH2Probe, coupling: appParam_CH2Coupling, lpf: appParam_CH2_LPF },
+        //
+        // The low-pass filter is the one display-processing stage that runs upstream of the
+        // 'acquired' snapshot, so it shapes both capture modes and its full configuration belongs
+        // in the file. beta60 split it into an ON/OFF flag plus a separate type, order and cutoff,
+        // where earlier versions put the filter type in appParam_CHn_LPF itself - so lpf now reads
+        // 'ON'/'OFF' rather than naming a filter, and lpf_type carries the name.
+        ch1: { vpd: appParam_current_CH1_VPD, vpos: (recCaptureMode === 'displayed' ? appParam_CH1Offset : 0), probe: appParam_CH1Probe, coupling: appParam_CH1Coupling,
+               lpf: appParam_CH1_LPF, lpf_type: recOpt(typeof appParam_CH1_LPFType !== 'undefined' ? appParam_CH1_LPFType : undefined),
+               lpf_order: recOpt(typeof appParam_CH1_LPFOrder !== 'undefined' ? appParam_CH1_LPFOrder : undefined),
+               lpf_hz: recOpt(typeof appParam_CH1_LPFValue !== 'undefined' && appParam_CH1_LPFValue ? appParam_CH1_LPFValue[2] : undefined),
+               invert: recOpt(typeof appParam_CH1invertY !== 'undefined' ? appParam_CH1invertY : undefined) },
+        ch2: { on: (appParam_CH2Enabled == 'ON'), vpd: appParam_current_CH2_VPD, vpos: (recCaptureMode === 'displayed' ? appParam_CH2Offset : 0), probe: appParam_CH2Probe, coupling: appParam_CH2Coupling,
+               lpf: appParam_CH2_LPF, lpf_type: recOpt(typeof appParam_CH2_LPFType !== 'undefined' ? appParam_CH2_LPFType : undefined),
+               lpf_order: recOpt(typeof appParam_CH2_LPFOrder !== 'undefined' ? appParam_CH2_LPFOrder : undefined),
+               lpf_hz: recOpt(typeof appParam_CH2_LPFValue !== 'undefined' && appParam_CH2_LPFValue ? appParam_CH2_LPFValue[2] : undefined),
+               invert: recOpt(typeof appParam_CH2invertY !== 'undefined' ? appParam_CH2invertY : undefined) },
         trig: {
             src: (appParam_triggerSource == 0 ? 'CH1' : 'CH2'),
             mode: appParam_triggerMode,
             edge: (appParam_triggerEdge == 0 ? 'rising' : 'falling'),
-            level: findTriggerVolts(appParam_triggerSource == 0 ? appParam_currVPD_CH1 : appParam_currVPD_CH2)
+            level: findTriggerVolts(appParam_triggerSource == 0 ? appParam_current_CH1_VPD : appParam_current_CH2_VPD)
         }
     };
 }
@@ -615,7 +680,7 @@ function stitchRollingFrames(frames, sampleRate) {
         // Nothing above covers shift 0: recFindOverlapShift() skips k <= 0, and the filling
         // branch needs b.length > a.length. The length test here is <=, not ===, because once
         // the screen is full `prev` is the ACCUMULATED stream and grows with every merge while
-        // each fresh read stays exactly appParam_intendedSamples long. The instrumented capture
+        // each fresh read stays exactly appParam_current_intendedSamples long. The instrumented capture
         // showed precisely that: cur=2401 every time against prev=2403..2508, dt=32-42ms,
         // expect=1. Requiring equal lengths caught only the filling phase and left the sliding
         // phase breaking once per ~75 reads, each break costing a whole frame.

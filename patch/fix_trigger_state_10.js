@@ -1,1 +1,0 @@
-        trigText = 'STOP'; // not acquiring

@@ -168,7 +168,7 @@ class TestAcceptanceCapture(unittest.TestCase):
 
     This is the check no offline test can make: that the app reads the *right* settings
     off the instrument. The arithmetic could be perfect and still produce nonsense if
-    appParam_currVPD_CH1 were not really CH1's V/div.
+    appParam_current_CH1_VPD were not really CH1's V/div.
     """
 
     def setUp(self):
