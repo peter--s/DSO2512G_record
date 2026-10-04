@@ -45,6 +45,7 @@
     {
       "name": "message_duration",
       "anchor": "            appParam_lastMessage = appParam_message;\n            appParam_messageCountdown = appParam_superXYMode == 'ON' ? 40 : (appParam_refreshRate == '25fps' ? 25 : 10);",
+      "require": ["appParam_messageCountdown--", "let ITERATION_INTERVAL = 100"],
       "forbid": ["appParam_turboMode"],
       "payload_file": "patch/message_duration.js"
     },

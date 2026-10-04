@@ -1640,3 +1640,44 @@ class TestAppStubSymbols(unittest.TestCase):
                 missing.append(name)
         self.assertEqual(missing, [],
                          "stubbed but no longer declared by the app: %s" % ", ".join(missing))
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestMessageDurationAtEveryRate(unittest.TestCase):
+    """The recorder's own messages must last recordMessageSeconds at every poll rate.
+
+    drawMessage() runs once per doIteration() and counts DOWN IN FRAMES, so seconds have to be
+    converted at the current iteration interval. That interval was hard-coded to 100 ms, which
+    is only the default: beta60 also runs at 40 ms ('Refresh Rate' = 25fps) and 25 ms (super-XY),
+    where a 5-second message cleared after 2.0 s and 1.25 s. Nothing failed visibly - the
+    message just vanished early - which is why this is pinned rather than left to inspection.
+    """
+
+    def frames(self, interval):
+        src = recording_source() + (
+            "\nITERATION_INTERVAL = %s;\n"
+            "appParam_messageFrames = 0;\n"
+            "recShowMessage('x');\n"
+            "__emit(JSON.stringify({frames: appParam_messageFrames,"
+            " seconds: recordMessageSeconds}));\n" % interval)
+        return run_js_json(src)
+
+    def test_seconds_are_honoured_at_every_interval(self):
+        for interval in (100, 40, 25):
+            got = self.frames(interval)
+            held_ms = got["frames"] * interval
+            self.assertAlmostEqual(held_ms / 1000.0, got["seconds"], delta=0.05,
+                                   msg="at %d ms the message held %d ms, wanted %d s"
+                                       % (interval, held_ms, got["seconds"]))
+
+    def test_the_frame_count_scales_with_the_rate(self):
+        """Faster polling means more frames for the same wall-clock duration."""
+        self.assertEqual(self.frames(100)["frames"], 50)
+        self.assertEqual(self.frames(40)["frames"], 125)
+        self.assertEqual(self.frames(25)["frames"], 200)
+
+    def test_a_nonsense_interval_falls_back_to_the_default(self):
+        """A missing or zero interval must not produce a zero-frame (invisible) message."""
+        for bad in ("0", "undefined", "'40'"):
+            got = self.frames(bad)
+            self.assertEqual(got["frames"], 50, "interval %s should fall back to 100 ms" % bad)

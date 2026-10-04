@@ -377,7 +377,10 @@ what is lost is the spacing *between* acquisitions, which at that duty cycle con
 nothing and is preserved anyway as each frame's `t_ms` in the sidecar. `timeline.mode` says
 which layout a file uses, and a `frames`-mode file carries a warning saying so.
 
-Turbo does not avoid this: 80 ms instead of 100 ms moves a factor of 4131 to about 3300.
+A faster poll does not avoid this. The app's **Refresh Rate** (Utility menu; `'10fps'` or
+`'25fps'`, called Turbo before beta60) takes the loop from 100 ms to 40 ms, and super-XY mode
+to 25 ms, but measured frame *arrival* only improved to about 80 ms — moving a duty-cycle factor
+of 4131 to roughly 3300. The gap is the instrument's, not the app's.
 
 ## The patching script
 
@@ -452,10 +455,23 @@ Notes:
   one op whose anchor still matched while the code around it had changed meaning — the roll-mode
   threshold moving 24 → 23, interpolation switching from scaling sample counts to scaling
   intervals, and beta46 moving averaging and smoothing upstream of the trim so that an
-  `acquired` capture silently began recording smoothed samples. All three built cleanly. An op
-  may therefore also carry `require` (strings that must be present) and `forbid` (strings that
-  must be absent); `forbid` is the more useful half, because naming the symbol a rename replaced
-  turns a silent semantic drift into a failed build. `check` reports these alongside the counts.
+  `acquired` capture silently began recording smoothed samples. All three built cleanly.
+
+  An op may therefore also carry `require` (strings that must be present) and `forbid` (strings
+  that must be absent), both reported by `check` alongside the counts. **A guard is only worth
+  having if it can fail while the anchor still matches** — otherwise the anchor already covers
+  it. The ones here are built that way and were tested by construction:
+
+  | op | guard | fires when |
+  |---|---|---|
+  | `snapshot_ch1` / `_ch2` | `require` the averaging/smoothing block immediately after the filter block | the pipeline is reordered again — exactly the beta46 trap |
+  | `message_duration` | `require` `appParam_messageCountdown--` | messages stop expiring per frame, which silently breaks the recorder's frame-based duration override |
+  | `message_duration` | `require` `let ITERATION_INTERVAL = 100` | the constant `recShowMessage()` converts seconds with is renamed or dropped |
+
+  A `forbid` naming the symbol a rename replaced (`appParam_turboMode`) is weaker than it looks:
+  the anchor usually embeds the *new* symbol, so a completed rename already fails it. It earns
+  its place only against a half-finished one — an app that updated this line but left the old
+  global declared elsewhere.
 - Ops are insertions by default — the payload lands after the anchor and the anchor survives.
   An op marked `"replace": true` substitutes the payload *for* the anchor instead, which is
   what fixes to existing app code need. Ops carrying `"target": "html"` apply to the HTML

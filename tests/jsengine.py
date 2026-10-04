@@ -110,6 +110,9 @@ APP_STUBS = (
     "var appCalib_2ChannelOffsetCH2 = [...Array(14)].map(() => Array(31).fill(0));\n"
     "var calib_FPGA = Array(14).fill(0);\n"
     "var isPlotting = false;\n"
+    # The main loop's period: 100 ms by default, 40 ms at 25fps, 25 ms in super-XY. The
+    # recorder converts message seconds to frames with it.
+    "var ITERATION_INTERVAL = 100;\n"
     "const verticalScale = 1, verticalOffsetCH1 = 0.005, verticalOffsetCH2 = 0.008;\n"
     "var appParam_message = '', appParam_lastMessage = '', appParam_messageChannel = '';\n"
     "var appParam_messageCountdown = 0;\n"

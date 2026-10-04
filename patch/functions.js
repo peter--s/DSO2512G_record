@@ -134,10 +134,19 @@ function recFrameHasSamples(arr) {
 }
 
 // Shows one of the recorder's own messages, which want longer on screen than the app's
-// default. drawMessage() runs once per doIteration(), so seconds convert at the iteration
-// interval; the override is consumed by the first draw and leaves other callers alone.
+// default. drawMessage() runs once per doIteration(), so the countdown is in FRAMES and
+// seconds convert at the current iteration interval; the override is consumed by the first
+// draw and leaves other callers alone.
+//
+// The interval has to be read live rather than assumed. It was hard-coded to 100 ms here,
+// which is only the default: the app also runs at 40 ms ('Refresh Rate' = 25fps) and at
+// 25 ms (super-XY), so a 5-second message cleared after 2.0 s and 1.25 s respectively. The
+// app keeps ITERATION_INTERVAL current in both togglers, so using it directly tracks every
+// mode, including any future one.
 function recShowMessage(text) {
-    appParam_messageFrames = Math.max(1, Math.round(recordMessageSeconds * 1000 / 100));
+    const interval = (typeof ITERATION_INTERVAL === 'number' && ITERATION_INTERVAL > 0)
+        ? ITERATION_INTERVAL : 100;
+    appParam_messageFrames = Math.max(1, Math.round(recordMessageSeconds * 1000 / interval));
     showMessage(text, "ALL");
 }
 
