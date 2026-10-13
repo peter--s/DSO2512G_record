@@ -22,7 +22,7 @@ import unittest
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # sha256 of the committed app_record.html, reproduced from the current build inputs.
-BASELINE_SHA256 = "3e5a2c19b2413b9b64ad606598195fb7889e073d96eff89abf3e1d9a6b512612"
+BASELINE_SHA256 = "9375b711a5fa6a873bef3dfc7f6c1c310b1452e5f393a5e60c9e353bf6c8acd8"
 
 ARTIFACT = os.path.join(REPO, "app_record.html")
 PATCH_JSON = os.path.join(REPO, "record_feature.patch.json")
@@ -396,3 +396,39 @@ class TestAppFixSelection(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(MISSING, NEED_INPUTS)
+class TestCleanedInputTitle(unittest.TestCase):
+    """app_clean.html must still carry the app's &nbsp;-padded title block.
+
+    The title's horizontal layout depends entirely on non-breaking spaces: .title-text-2 is
+    position: absolute, so "ZEEWEII" contributes no width to the line, and the only thing
+    keeping "DSO2512G" clear of it is a run of six &nbsp; inside #title-text. BeautifulSoup's
+    prettify() decodes &nbsp; to U+00A0, which Python's str.strip() treats as whitespace, so
+    re-indenting deletes exactly those paddings and the two titles render on top of each other.
+    prettify() also puts inline elements on their own lines, and a newline between inline
+    elements renders as a space, so DSO<span>2512</span>G becomes a visibly spaced "DSO 2512 G".
+
+    Both are repaired by `js_analyzer.py <file> --clean`, which is the documented build path.
+    Cleaning with html_cleaner.py instead produces a file that patches and tests perfectly while
+    being visibly wrong in the browser - which is how it happened - so the artifact is checked
+    here rather than trusted.
+    """
+
+    CANON = ('<span class="title-text-2">&nbsp;ZEEWEII</span>'
+             '<span id="title-text">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp;&nbsp; '
+             'DSO<span class="colored-text">2512</span>G')
+
+    def test_the_title_block_is_intact(self):
+        self.assertIn(self.CANON, read(CLEAN),
+                      "app_clean.html lost the title's &nbsp; padding - re-clean it with "
+                      "js_analyzer.py --clean, not html_cleaner.py")
+
+    def test_the_patched_app_keeps_it(self):
+        """The patch must not disturb it either."""
+        self.assertIn(self.CANON, read(ARTIFACT))
+
+    def test_non_breaking_spaces_survived_generally(self):
+        """Not just the title: prettify ate 35 of 39 app-wide before the formatter was fixed."""
+        self.assertGreater(read(CLEAN).count("&nbsp;"), 30)
