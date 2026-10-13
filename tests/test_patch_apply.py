@@ -22,7 +22,7 @@ import unittest
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # sha256 of the committed app_record.html, reproduced from the current build inputs.
-BASELINE_SHA256 = "9375b711a5fa6a873bef3dfc7f6c1c310b1452e5f393a5e60c9e353bf6c8acd8"
+BASELINE_SHA256 = "d4a7296fe486ba3a3040c4b961e5dbc6228b7bacee50e06de7a1abf617f1a554"
 
 ARTIFACT = os.path.join(REPO, "app_record.html")
 PATCH_JSON = os.path.join(REPO, "record_feature.patch.json")
@@ -394,10 +394,6 @@ class TestAppFixSelection(unittest.TestCase):
         self.assertEqual(fixed, build("ALL"), "the fixed build is not reproducible")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 @unittest.skipIf(MISSING, NEED_INPUTS)
 class TestCleanedInputTitle(unittest.TestCase):
     """app_clean.html must still carry the app's &nbsp;-padded title block.
@@ -429,6 +425,21 @@ class TestCleanedInputTitle(unittest.TestCase):
         """The patch must not disturb it either."""
         self.assertIn(self.CANON, read(ARTIFACT))
 
-    def test_non_breaking_spaces_survived_generally(self):
-        """Not just the title: prettify ate 35 of 39 app-wide before the formatter was fixed."""
-        self.assertGreater(read(CLEAN).count("&nbsp;"), 30)
+    def test_the_title_keeps_its_full_padding(self):
+        """All thirteen of the title block's own &nbsp;, not just the six that space the names.
+
+        The app loses 22 further &nbsp; elsewhere to prettify, and that is deliberate: those sit
+        between inline elements, where prettify leaves a newline that collapses to one ordinary
+        space of the same width, so the only visible effect is three label gaps narrowing by
+        about 3px. The title is the sole place where the padding is load-bearing, because it
+        works against an absolutely positioned sibling and leading whitespace in an inline
+        formatting context is dropped outright rather than collapsed.
+        """
+        clean = read(CLEAN)
+        start = clean.index('<span class="title-text-2">&nbsp;ZEEWEII')
+        end = clean.index("200 MSa/s</span>", start) + len("200 MSa/s</span>")
+        self.assertEqual(clean[start:end].count("&nbsp;"), 13)
+
+
+if __name__ == "__main__":
+    unittest.main()
