@@ -1681,3 +1681,49 @@ class TestMessageDurationAtEveryRate(unittest.TestCase):
         for bad in ("0", "undefined", "'40'"):
             got = self.frames(bad)
             self.assertEqual(got["frames"], 50, "interval %s should fall back to 100 ms" % bad)
+
+
+@unittest.skipUnless(HAVE_ENGINE, NO_ENGINE)
+class TestSidecarKeepsEveryChannelField(unittest.TestCase):
+    """Everything recSnapshotSettings() captures per channel must reach the sidecar.
+
+    buildRecordingSidecar()'s chanSettings() whitelists the keys it copies, so a field added to
+    recSnapshotSettings() is computed per frame and then silently dropped unless it is named
+    there too. That is not hypothetical: the beta60 additions (lpf_type, lpf_order, lpf_hz,
+    invert) were dropped exactly this way, and nothing caught it until a real capture came back
+    with ch1 still carrying only the original five keys. Comparing the two sides keeps the next
+    addition honest as well.
+    """
+
+    def keys(self):
+        src = recording_source() + (
+            "\nrecCaptureMode = 'displayed';\n"
+            "recPendingTime = 0;\n"
+            "var s = recSnapshotSettings(4);\n"
+            "var frames = [{ch1: new Array(4).fill(0.25), ch2: new Array(4).fill(0.1), s: s}];\n"
+            "recordSampleRate = 20000;\n"
+            "var tl = planRecordingTimeline(frames, 20000);\n"
+            "var sc = buildRecordingSidecar(tl, true, [], 1, 1, 20000);\n"
+            "__emit(JSON.stringify({snap1: Object.keys(s.ch1), snap2: Object.keys(s.ch2),\n"
+            "                       out1: Object.keys(sc.frames[0].ch1),\n"
+            "                       out2: Object.keys(sc.frames[0].ch2)}));\n")
+        return run_js_json(src)
+
+    def test_ch1_loses_nothing(self):
+        k = self.keys()
+        missing = sorted(set(k["snap1"]) - set(k["out1"]))
+        self.assertEqual(missing, [], "captured for CH1 but absent from the sidecar: %s" % missing)
+
+    def test_ch2_loses_nothing(self):
+        k = self.keys()
+        # 'on' is deliberately not copied: the sidecar reports 'present', derived from whether
+        # the frame actually holds CH2 samples rather than from the setting at capture time.
+        missing = sorted(set(k["snap2"]) - set(k["out2"]) - {"on"})
+        self.assertEqual(missing, [], "captured for CH2 but absent from the sidecar: %s" % missing)
+
+    def test_the_beta60_fields_are_among_them(self):
+        """Named explicitly, so the reason this test exists stays legible."""
+        k = self.keys()
+        for field in ("lpf_type", "lpf_order", "lpf_hz", "invert"):
+            self.assertIn(field, k["out1"])
+            self.assertIn(field, k["out2"])

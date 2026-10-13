@@ -454,8 +454,14 @@ function recordingTimestamp() {
 // and everything needed to check the conversion after the fact, goes here.
 function buildRecordingSidecar(timeline, ch2Enabled, warnings, segIndex, segCount, sampleRate) {
     const chan = (nth, name) => ({ name: name, entry_base: recordAnalogBase(nth), unit: "V" });
+    // This whitelists the fields rather than copying cfg, so anything recSnapshotSettings()
+    // learns to capture has to be named here too or it is computed and then silently dropped -
+    // which is exactly what happened to the beta60 additions below until a real capture showed
+    // ch1 still carrying only the original five keys.
     const chanSettings = (cfg) => ({
-        vpd: cfg.vpd, vpos: cfg.vpos, probe: cfg.probe, coupling: cfg.coupling, lpf: cfg.lpf
+        vpd: cfg.vpd, vpos: cfg.vpos, probe: cfg.probe, coupling: cfg.coupling,
+        lpf: cfg.lpf, lpf_type: cfg.lpf_type, lpf_order: cfg.lpf_order, lpf_hz: cfg.lpf_hz,
+        invert: cfg.invert
     });
 
     // Which capture modes appear here. Normally one: the mode is fixed when RECORD is pressed

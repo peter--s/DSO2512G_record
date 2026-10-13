@@ -22,7 +22,7 @@ import unittest
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # sha256 of the committed app_record.html, reproduced from the current build inputs.
-BASELINE_SHA256 = "095471342b2a35d1e2ad505588169e75ac2cb0a32aa7ec4162954bda8537a44a"
+BASELINE_SHA256 = "3e5a2c19b2413b9b64ad606598195fb7889e073d96eff89abf3e1d9a6b512612"
 
 ARTIFACT = os.path.join(REPO, "app_record.html")
 PATCH_JSON = os.path.join(REPO, "record_feature.patch.json")
